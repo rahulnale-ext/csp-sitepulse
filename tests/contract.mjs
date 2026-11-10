@@ -1,0 +1,20 @@
+import {readFileSync,existsSync} from 'node:fs';
+import {resolve} from 'node:path';
+import assert from 'node:assert/strict';
+const root=resolve(import.meta.dirname,'..');
+const read=p=>readFileSync(resolve(root,p),'utf8');
+const app=read('src/app/app.component.ts');
+const html=read('src/app/app.component.html');
+const backend=read('backend/Code.gs');
+const worker=read('worker/index.js');
+const methods=[...app.matchAll(/\.call(?:<[^>]+>)?\(['"]([^'"]+)['"]/g)].map(m=>m[1]);
+const publicPart=backend.split('const CSP_PUBLIC_RPC_METHODS')[1]?.split('function doPost')[0]||'';
+for(const method of methods){assert(publicPart.includes(`'${method}'`),`Frontend refers to non-allowlisted API method: ${method}`);}
+assert(backend.includes('function saveMenuLabels(sessionToken,labels)'));
+assert(backend.includes("'mr-IN':'Marathi'"));
+assert(backend.includes("const authless = ['requestLoginCode','verifyLoginCode'];"),'Logout must not be authless');
+assert(worker.includes('ALLOWED_ORIGIN')&&worker.includes('APPS_SCRIPT_URL'));
+assert(!worker.includes('GEMINI_API_KEY')&&!app.includes('FCM_SERVICE_ACCOUNT_JSON'));
+for(const size of [192,512])assert(existsSync(resolve(root,`public/icons/icon-${size}.png`)));
+assert(html.includes('verifiedDraft')&&html.includes('revisionFor')&&html.includes('jiraDetail.properties'));
+console.log(`PASS: ${methods.length} frontend API calls, backend auth/RPC checks, PWA assets and key workflow template markers.`);

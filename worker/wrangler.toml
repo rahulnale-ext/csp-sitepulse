@@ -1,0 +1,5 @@
+name = "csp-sitepulse-api"
+main = "index.js"
+compatibility_date = "2025-08-01"
+# Set ALLOWED_ORIGIN through `wrangler secret put ALLOWED_ORIGIN` or in dashboard.
+# Set APPS_SCRIPT_URL as a secret too. NEVER copy it into your Angular source.
