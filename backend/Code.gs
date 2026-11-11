@@ -6,21 +6,24 @@
  */
 
 const TABLES = Object.freeze({
-  Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id'],
+  Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id', 'mobile_number', 'birth_date', 'photo_data', 'account_status'],
   Master_Items: ['id', 'type', 'name', 'current_price', 'quantity', 'rate_unit'],
   Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee'],
-  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit'],
+  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text'],
   Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit'],
   Notifications: ['id', 'recipient_id', 'actor_id', 'type', 'title', 'body', 'target_kind', 'target_id', 'created_at', 'read_at'],
   Push_Subscriptions: ['id', 'user_id', 'token', 'device_label', 'created_at', 'updated_at'],
   Sessions: ['token_hash', 'user_id', 'email', 'created_at', 'expires_at'],
   Lead_Rules: ['id', 'supervisor_id', 'lead_id', 'rule_type', 'ticket_id', 'weekday', 'start_time', 'end_time', 'active', 'created_at'],
   Audit_Log: ['id', 'actor_id', 'action', 'target_id', 'created_at', 'before_json', 'after_json'],
-  App_Settings: ['key', 'value', 'updated_at', 'updated_by']
+  App_Settings: ['key', 'value', 'updated_at', 'updated_by'],
+  Direct_Messages: ['id','sender_id','recipient_id','body','created_at','read_at'],
+  Item_Rates: ['id','item_id','category','old_rate','new_rate','rate_unit','changed_at','changed_by'],
+  CSP_Staff_Profiles: ['role','name','email','mobile_number','manager_name','review_status','source']
 });
 const ITEM_TYPES = ['material', 'machine', 'labour', 'other'];
 const USER_ROLES = ['admin', 'supervisor', 'lead'];
-const COMPLETION_STATES = ['not started', 'in progress', 'completed'];
+const COMPLETION_STATES = ['not started', 'in progress', 'partially completed', 'completed'];
 const CSP_DIRECTORY_HEADERS = ['Roles (App Terms)', 'eMail IDs', 'WhatsApp No.', 'Supervisors (Users)', 'eMail IDs', 'WhatsApp No.', 'Leads (Approvers)', 'eMail IDs', 'WhatsApp No.', 'CSP Centre (Admin)'];
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -45,6 +48,7 @@ function setupProject() {
     databaseUrl = initializeNewProject_();
   }
   const reportingUrl = ensureReportingWorkbook_().getUrl();
+  seedScreenshotProfilesSheet_(SpreadsheetApp.openById(props.getProperty('SPREADSHEET_ID')));
   Logger.log('Operations spreadsheet: ' + databaseUrl);
   Logger.log('Reporting workbook: ' + reportingUrl);
   return {operationsUrl: databaseUrl, reportingWorkbookUrl: reportingUrl,
@@ -272,7 +276,8 @@ function requestLoginCode(emailInput) {
   const user = rows_(db_(), 'Users').find(function(u) {
     return String(u.email).trim().toLowerCase() === email;
   });
-  if (!user) return response; // Same answer for unknown addresses.
+  if (!user || String(user.account_status||'active')!=='active' ||
+      (user.role==='supervisor'&&!user.manager_id)) return response; // Same answer for unknown/inactive addresses.
   const cache = authCache_();
   const key = authKey_(email);
   const lock = LockService.getScriptLock();
@@ -335,7 +340,7 @@ function verifyLoginCode(emailInput, codeInput) {
     const user = rows_(db_(), 'Users').find(function(u) {
       return String(u.email).trim().toLowerCase() === email;
     });
-    if (!user) throw new Error('Account access was removed. Contact your administrator.');
+    if (!user || String(user.account_status||'active')!=='active') throw new Error('Account access is pending administrator approval.');
     const sessionToken = Utilities.getUuid() + Utilities.getUuid() + Utilities.getUuid();
     const ss=db_();
     write_(ss,'Sessions',{token_hash:digest_(sessionToken),user_id:String(user.id),email:email,created_at:new Date().toISOString(),expires_at:new Date(Date.now()+SESSION_TTL_MS).toISOString()});
@@ -356,7 +361,7 @@ function identity_(ss, sessionToken) {
   const session=rows_(ss,'Sessions').find(function(r){return String(r.token_hash)===hash;});
   if (!session || Date.now()>=new Date(session.expires_at).getTime()) throw new Error('Your seven-day session has expired. Please sign in again.');
   const user=rows_(ss,'Users').find(function(u){return String(u.id)===String(session.user_id) && String(u.email).toLowerCase()===String(session.email).toLowerCase();});
-  if (!user) throw new Error('Your account is no longer authorized.');
+  if (!user || String(user.account_status||'active')!=='active') throw new Error('Your account is not active.');
   return user;
 }
 function requireRole_(ss, allowed, sessionToken) {
@@ -407,6 +412,7 @@ function getBootstrap(sessionToken) {
   return {
     authorized: true, user: publicRow_(user),
     items: role === 'supervisor' ? allItems.map(function(i) { return {id:i.id, type:i.type, name:i.name, rate_unit:i.rate_unit||'unit'}; }) : allItems,
+    itemRates: role==='supervisor'?[]:rows_(ss,'Item_Rates').map(publicRow_).slice(-750).reverse(),
     tickets: scopedTickets_(ss, user), reports: reportsFor_(ss, user),
     leadRules: role==='admin' ? rows_(ss,'Lead_Rules').map(publicRow_) : [],
     users: role === 'admin' ? rows_(ss, 'Users').map(publicRow_) :
@@ -416,6 +422,8 @@ function getBootstrap(sessionToken) {
         return rows_(ss,'Users').filter(function(u){return (u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true')) && (String(u.manager_id)===String(user.id) || supIds.has(String(u.id)));}).map(publicRow_);
       })() : [],
     notifications: notificationRows_(ss, user.id),
+    messages: messagesFor_(ss,user.id),
+    contacts: rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';}).map(function(u){return {id:u.id,name:u.name,role:u.role};}),
     jiraReady: role === 'admin' && jiraConfigured_(props),
     reportingWorkbookReady:!!props.getProperty('REPORTING_WORKBOOK_ID'),
     jiraBaseUrl: /^https:\/\/[a-z0-9.-]+(?::443)?$/i.test(jiraHost) ? jiraHost : '',
@@ -456,7 +464,7 @@ function reportsFor_(ss, user) {
     const view = {id:r.id, ticket_id:r.ticket_id, supervisor_id:r.supervisor_id,
       ticket_no:ticket.jira_ticket_no || 'Unknown ticket', location:ticket.location || '',
       supervisor_name:supervisor.name || 'Unknown user', date:r.date,
-      work_done:r.work_done, completion_status:r.completion_status, status:r.status,
+      work_done:r.work_done,daily_report_text:r.daily_report_text||'', completion_status:r.completion_status, status:r.status,
       revision_note:r.revision_note || '', revision_count:Number(r.revision_count || 0),
       work_measure:Number(r.work_measure||0),work_measure_unit:r.work_measure_unit||'',
       lines:byReport[String(r.id)] || []};
@@ -490,6 +498,10 @@ function saveMasterItem(sessionToken, payload) {
     const saved = {id: existing ? existing.id : newId_(), type: type, name: name, current_price: price, quantity:quantity, rate_unit:rateUnit};
     if (existing) saved._row = existing._row;
     write_(ss, 'Master_Items', saved);
+    if (!existing || Number(existing.current_price)!==price) {
+      const actor=identity_(ss,sessionToken);
+      write_(ss,'Item_Rates',{id:newId_(),item_id:saved.id,category:type,old_rate:existing?Number(existing.current_price):'',new_rate:price,rate_unit:rateUnit,changed_at:new Date().toISOString(),changed_by:actor.id});
+    }
     return publicRow_(saved);
   });
 }
@@ -542,10 +554,15 @@ function saveUser(sessionToken, payload) {
       throw new Error('Reassign this member’s direct reports before changing their role.');
     }
     if (canSupervise && role==='lead' && actingLeadId && !all.some(function(u){return u.role==='lead' && String(u.id)===actingLeadId && (!existing || String(u.id)!==String(existing.id));})) throw new Error('Select another lead as reviewer.');
-    const saved = {id: existing ? existing.id : newId_(), role: role, name: name, email: email, manager_id:managerId,can_supervise:canSupervise,acting_lead_id:actingLeadId};
+    const status=String(payload.account_status|| (existing&&existing.account_status)||'active');
+    if(['active','pending'].indexOf(status)<0)throw new Error('Invalid account status.');
+    const mobile=text_(payload.mobile_number||'','Mobile number',30,false);
+    const date=validBirthDate_(payload.birth_date||'');
+    const photo=validPhoto_(payload.photo_data||'');
+    const saved = {id: existing ? existing.id : newId_(), role: role, name: name, email: email, manager_id:managerId,can_supervise:canSupervise,acting_lead_id:actingLeadId,mobile_number:mobile,birth_date:date,photo_data:photo,account_status:status};
     if (existing) saved._row = existing._row;
     write_(ss, 'Users', saved);
-    notify_(ss,saved.id,actor.id,'team_access',existing?'Account permissions updated':'Welcome to CSP Data Manager',
+    if(status==='active') notify_(ss,saved.id,actor.id,'team_access',existing?'Account permissions updated':'Welcome to CSP Data Manager',
       'Role: '+role+(managerId ? '. Your assigned manager is '+(all.find(function(u){return String(u.id)===managerId;})||{}).name : '')+'. Sign in using your registered email.','team',saved.id);
     if (managerId && (!existing || String(existing.manager_id)!==managerId)) {
       notify_(ss,managerId,actor.id,'hierarchy_assigned','New direct report',saved.name+' is now assigned under you.','team',saved.id);
@@ -579,7 +596,7 @@ function notify_(ss, recipientId, actorId, type, title, body, targetKind, target
     target_kind:targetKind || '', target_id:targetId || '', created_at:new Date().toISOString(), read_at:''};
   write_(ss, 'Notifications', note);
   try {
-    if (user.email && MailApp.getRemainingDailyQuota() > 0) MailApp.sendEmail({to:user.email,
+    if (type!=='direct_message' && user.email && MailApp.getRemainingDailyQuota() > 0) MailApp.sendEmail({to:user.email,
       subject:'CSP Data Manager: ' + title, body:title + '\n\n' + body +
         '\n\nOpen CSP Data Manager to review. This is an automated notification.', name:'CSP Data Manager'});
   } catch (ignored) { console.warn('CSP Data Manager notification email was unavailable: ' + type); }
@@ -650,8 +667,19 @@ function reportLinePayload_(ss, payload, prior) {
       locked_price:old[key] ? Number(old[key].locked_price) : number_(masters[key].current_price,'Master price',true),
       rate_unit:old[key] ? String(old[key].rate_unit||masters[key].rate_unit||'unit') : String(masters[key].rate_unit||'unit')};
   });
-  if (!lines.length) throw new Error('Add at least one resource quantity.');
+  // Reports can truthfully record no materials, equipment or labour as Not Used.
   return lines;
+}
+function dailyReportText_(payload,ticket,sup){
+  const text=text_(payload.daily_report_text||'', 'Daily site report', 11000, true);
+  if(!ticket||!sup||!text.startsWith('DAILY SITE REPORT\n')||
+    text.indexOf('Ticket No: '+ticket.jira_ticket_no)<0||
+    text.indexOf('Supervisor name: '+sup.name)<0||
+    text.indexOf('Work Done:')<0||text.indexOf('Materials Used')<0||
+    text.indexOf('Equipment Used')<0||text.indexOf('Work Completion Status')<0){
+    throw new Error('The daily site report preview is incomplete. Generate and verify it before submitting.');
+  }
+  return text;
 }
 function submitReport(sessionToken,payload) {
   if (!payload || typeof payload!=='object') throw new Error('Invalid report.');
@@ -674,13 +702,13 @@ function submitReport(sessionToken,payload) {
     if(!reviewer||String(reviewer)===String(sup.id)||!rows_(ss,'Users').some(function(u){return u.role==='lead'&&String(u.id)===String(reviewer);}))throw new Error('Choose a separate reviewing lead for this ticket before submitting a report.');
     const report={id:newId_(),ticket_id:ticket.id,supervisor_id:sup.id,date:new Date().toISOString(),
       approver_id:reviewer,work_measure:number_(payload.work_measure||0,'Work quantity',true),work_measure_unit:text_(payload.work_measure_unit||'','Work unit',32,false),
-      work_done:work,completion_status:completion,
+      work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),completion_status:completion,
       amount_of_work:money_(lines.reduce(function(total,l){return total+l.quantity*l.locked_price;},0)),
       status:'pending',revision_note:'',revision_count:0};
     write_(ss,'Reports',report);
     const lineSheet=ss.getSheetByName('Report_Line_Items');
     const insert=lines.map(function(l){return [newId_(),report.id,l.item_id,l.quantity,l.locked_price,l.rate_unit];});
-    lineSheet.getRange(lineSheet.getLastRow()+1,1,insert.length,TABLES.Report_Line_Items.length).setValues(insert);
+    if (insert.length) lineSheet.getRange(lineSheet.getLastRow()+1,1,insert.length,TABLES.Report_Line_Items.length).setValues(insert);
     ticket.assignment_status='in_progress'; write_(ss,'Tickets',ticket);
     notify_(ss,report.approver_id,sup.id,'report_submitted','Report awaiting review',sup.name+' submitted a report for '+ticket.jira_ticket_no,'report',report.id);
     return {id:report.id,status:report.status};
@@ -712,6 +740,8 @@ function reviseReport(sessionToken,reportId,payload) {
     const completion=String(payload.completion_status||'').toLowerCase();
     if (COMPLETION_STATES.indexOf(completion)<0) throw new Error('Invalid completion status.');
     report.work_done=text_(payload.work_done,'Work performed',3000,true);
+    const currentTicket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(report.ticket_id);});
+    report.daily_report_text=dailyReportText_(payload,currentTicket,sup);
     report.completion_status=completion;
     report.work_measure=number_(payload.work_measure||0,'Work quantity',true);report.work_measure_unit=text_(payload.work_measure_unit||'','Work unit',32,false);
     report.amount_of_work=money_(lines.reduce(function(sum,l){return sum+l.quantity*l.locked_price;},0));
@@ -747,7 +777,7 @@ function reviewReport(sessionToken,reportId,action,edits) {
       const byId={};
       edits.forEach(function(e){const id=String(e.id||'');if(Object.prototype.hasOwnProperty.call(byId,id))throw new Error('Duplicate line item.');byId[id]=number_(e.quantity,'Quantity',true);});
       if (!lines.every(function(l){return Object.prototype.hasOwnProperty.call(byId,String(l.id));})) throw new Error('Line IDs do not match the report.');
-      if (!lines.some(function(l){return byId[String(l.id)]>0;})) throw new Error('At least one quantity must be positive.');
+      if (lines.length && !lines.some(function(l){return byId[String(l.id)]>0;})) throw new Error('At least one quantity must be positive.');
       lines.forEach(function(l){l.quantity=byId[String(l.id)];write_(ss,'Report_Line_Items',l);});
       report.amount_of_work=money_(lines.reduce(function(sum,l){return sum+Number(l.quantity)*Number(l.locked_price);},0));
       if (report.completion_status==='completed') {
@@ -787,7 +817,7 @@ function adminUpdateReport(sessionToken,reportId,payload) {
     const updates={};
     quantities.forEach(function(l){if(updates[String(l.id)]!==undefined)throw new Error('Duplicate report line.');updates[String(l.id)]=number_(l.quantity,'Quantity',true);});
     if(!lines.every(function(l){return updates[String(l.id)]!==undefined;}))throw new Error('Unknown report line.');
-    if(!lines.some(function(l){return updates[String(l.id)]>0;}))throw new Error('At least one item quantity must be positive.');
+    if(lines.length && !lines.some(function(l){return updates[String(l.id)]>0;}))throw new Error('At least one item quantity must be positive.');
     const lineBefore=lines.map(function(l){return {id:l.id,quantity:l.quantity};});
     lines.forEach(function(l){l.quantity=updates[String(l.id)];write_(ss,'Report_Line_Items',l);});
     report.amount_of_work=money_(lines.reduce(function(sum,l){return sum+Number(l.quantity)*Number(l.locked_price);},0));
@@ -988,11 +1018,11 @@ function jiraResolveAssigneeFields_(settings) {
 }
 function jiraFields_(settings) {
   return Array.from(new Set(['summary','status','assignee','project','components','issuelinks','created','reporter']
-    .concat(settings.custom.filter(Boolean)).concat(['JIRA_CONTACT_FIELD','JIRA_REQUEST_TYPE_FIELD','JIRA_SUB_REQUEST_FIELD','JIRA_DESIGN_NEEDED_FIELD'].map(function(n){return String(settings.props.getProperty(n)||'');}).filter(function(x){return /^customfield_\d+$/.test(x);})).concat(jiraAssigneeFields_(settings))));
+    .concat(settings.custom.filter(Boolean)).concat(['JIRA_CONTACT_FIELD','JIRA_REQUEST_TYPE_FIELD','JIRA_SUB_REQUEST_FIELD','JIRA_DESIGN_NEEDED_FIELD'].map(function(n){return String(settings.props.getProperty(n)||'');}).filter(function(x){return /^customfield_\d+$/.test(x);})).concat(settings.assigneeFields||jiraAssigneeFields_(settings))));
 }
 function jiraAssigneeList_(fields,settings) {
   const output=[];
-  jiraAssigneeFields_(settings).forEach(function(id){
+  (settings.assigneeFields||jiraAssigneeFields_(settings)).forEach(function(id){
     const value=fields[id];
     (Array.isArray(value)?value:[value]).forEach(function(x){
       if(!x)return;
@@ -1044,7 +1074,11 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
     const normalize=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
     const resolvedSupervisor=function(t){
       let assignees=[];try{assignees=JSON.parse(t.jira_assignees||'[]');}catch(_){}
-      const matched=users.filter(function(u){return assignees.some(function(a){return (a.email && u.email && String(a.email).toLowerCase()===String(u.email).toLowerCase()) || (a.name && normalize(a.name) && normalize(a.name)===normalize(u.name));});});
+      const matched=users.filter(function(u){
+        const workEmail=String(u.email||'').toLowerCase();
+        const emailName=workEmail.endsWith('@sadhguru.org')?normalize(workEmail.split('@')[0].replace(/-ext$/,'').replace(/\./g,' ')):'';
+        return assignees.some(function(a){const name=normalize(a.name);return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&(name===normalize(u.name)||name===emailName));});
+      });
       return matched.length===1 ? matched[0].id : '';
     };
     const byKey = Object.fromEntries(existing.map(function(t) { return [String(t.jira_ticket_no).toUpperCase(), t]; }));
@@ -1053,6 +1087,7 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
     let created = 0;
     let updated = 0;
     let lastTicket = null;
+    const newlyAssigned=[];
     const seen = new Set();
     rows.forEach(function(t) {
       const key = String(t.jira_ticket_no).toUpperCase();
@@ -1062,7 +1097,10 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
       if (old) {
         const match=resolvedSupervisor(t);
         const merged = Object.assign({}, old, t, {id: old.id, _row: old._row});
-        if(match && !old.assigned_supervisor_id){merged.assigned_supervisor_id=match;merged.assigned_at=new Date().toISOString();merged.assigned_by='jira';merged.assignment_status='assigned';}
+        if(match && String(old.assigned_supervisor_id||'')!==String(match) && (!old.assigned_by||old.assigned_by==='jira')){
+          merged.assigned_supervisor_id=match;merged.assigned_at=new Date().toISOString();merged.assigned_by='jira';merged.assignment_status='assigned';
+          newlyAssigned.push({ticket:merged,previous:String(old.assigned_supervisor_id||'')});
+        }
         write_(ss, 'Tickets', merged);
         updated++;
         lastTicket = publicRow_(merged);
@@ -1070,6 +1108,7 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
         const match=resolvedSupervisor(t);
         const added = Object.assign({id: newId_(),assigned_supervisor_id:match||'',assigned_at:match?new Date().toISOString():'',assigned_by:match?'jira':'',assignment_status:match?'assigned':''}, t);
         additions.push(added);
+        if(match)newlyAssigned.push({ticket:added,previous:''});
         created++;
         lastTicket = added;
       }
@@ -1078,7 +1117,13 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
       const values = additions.map(function(t) { return TABLES.Tickets.map(function(k) { return t[k] || ''; }); });
       sheet.getRange(sheet.getLastRow() + 1, 1, values.length, TABLES.Tickets.length).setValues(values);
     }
-    return {created: created, updated: updated, ticket: lastTicket};
+    newlyAssigned.slice(0,150).forEach(function(entry){
+      const ticket=entry.ticket;const sup=users.find(function(u){return String(u.id)===String(ticket.assigned_supervisor_id);});
+      notify_(ss,ticket.assigned_supervisor_id,'jira','ticket_assigned','Jira ticket assigned',ticket.jira_ticket_no+' — '+ticket.summary,'ticket',ticket.id);
+      if(sup)notifyLeads_(ss,sup,'jira','ticket_assigned','Supervisor assigned in Jira',sup.name+': '+ticket.jira_ticket_no,'ticket',ticket.id);
+      if(entry.previous)notify_(ss,entry.previous,'jira','ticket_reassigned','Jira ticket reassigned',ticket.jira_ticket_no+' has moved to another supervisor.','ticket',ticket.id);
+    });
+    return {created: created, updated: updated, ticket: lastTicket,assignmentAlerts:newlyAssigned.length};
   });
 }
 
@@ -1287,6 +1332,19 @@ function workbookCell_(value) {
   // Other values beginning with Excel operators are treated as plain text.
   return /^=/.test(v)?v:/^[+\-@\t\r]/.test(v)?"'"+v:v;
 }
+/** Header rename only; formulas and data rows are untouched. */
+function renameReportingWorkbookColumn(sessionToken,tabName,colInput,newHeading){
+  requireRole_(db_(),['admin'],sessionToken);
+  const book=ensureReportingWorkbook_();
+  const tab=book.getSheetByName(String(tabName||''));
+  if(!tab)throw new Error('Worksheet not found.');
+  const col=Number(colInput);if(!Number.isInteger(col)||col<1||col>tab.getLastColumn())throw new Error('Invalid column.');
+  const name=text_(newHeading,'Column heading',90,true);
+  const cell=tab.getRange(1,col);if(cell.getFormula())throw new Error('Cannot rename a formula cell.');
+  const old=cell.getDisplayValue();cell.setValue(name);
+  return {oldHeading:old,newHeading:name,column:col};
+}
+
 function editReportingWorkbookCell(sessionToken,tabName,rowInput,colInput,value) {
   return workbookEdit_(sessionToken,function(book){const tab=reportingTab_(book,tabName);const row=Number(rowInput),col=Number(colInput);
     if(!Number.isInteger(row)||row<1||row>tab.getLastRow()||!Number.isInteger(col)||col<1||col>tab.getLastColumn())throw new Error('Cell is outside the worksheet.');
@@ -1325,12 +1383,21 @@ function deleteReportingWorkbookColumn(sessionToken,tabName,colInput) {
  * It is not silently merged into Users, because names/emails in the Markdown
  * do not provide a verified one-to-one mapping for all fields.
  */
-const CSP_DIRECTORY_SEED = [["1", "raju.venkatesh-ext@sadhguru.org", "99898 95660", "Raju venkatesh", "", "", "", "", "", "Kannan<br>Murugesh<br>Abhijaya"], ["2", "murugesh.subbappa-ext@sadhguru.org", "91770 32993", "Murugesh Subbappa", "vignesh.mani@sadhguru.org", "824 808 3687", "Vighnesh", "", "", ""], ["3", "ishaansharma1925@gmail.com", "93996 65156", "Ayush", "", "", "", "", "", ""], ["4", "gunasekaran.n4666@gmail.com", "91596 94666", "Guna", "sivakumar.pichaimuthu@sadhguru.org", "94429 15000", "Siva", "", "", ""], ["5", "balakrishnan.erusappan@sadhguru.org", "99446 57775", "Balakrishnanan", "bankim.mehta@sadhguru.org", "84383 01351", "Bankim", "kannan.marimuthu@sadhguru.org", "97914 98376", ""], ["6", "kalaiarasan.pannerselvam-ext@sadhguru.org", "72007 16163", "Kalai", "", "", "", "", "", ""], ["7", "vasanth.kongarayan-ext@sadhguru.org", "63747 59455", "Vasant", "", "", "", "", "", ""], ["8", "prakash1999praka@gmail.com", "93636 71635", "Prakash", "", "", "", "", "", ""], ["9", "thangapandi.meiyakonar-ext@sadhguru.org", "877 898 2395", "Thangapandi", "murugesan.gurusamy@sadhguru.org", "99438 94721", "Murugesh", "", "", ""], ["10", "rajsuresh1008@gmail.com", "80157 22698", "SURESH", "", "", "", "abhijaya@sadhguru.org", "7774016404", ""], ["11", "kartikeya.hanmuga-ext@sadhguru.org", "70107 72023", "KARTIKEYAN", "", "", "", "", "", ""], ["12", "karthikg2803200372@gmail.com", "72001 24221", "KARTIK", "", "", "", "", "", ""]];
+/** Private roster is stored only as Apps Script Properties, never in a public repository. */
+function privateCspDirectory_(){
+  const raw=PropertiesService.getScriptProperties().getProperty('CSP_PRIVATE_STAFF_JSON');
+  if(!raw)return [];
+  const data=JSON.parse(raw);
+  if(!Array.isArray(data)||!data.every(function(r){return Array.isArray(r)&&r.length===10;}))throw new Error('Private staff roster is invalid.');
+  return data;
+}
 function seedCspDirectory(sessionToken) {
   return transaction_(function(ss){requireRole_(ss,['admin'],sessionToken);const sh=ss.getSheetByName('CSP_Directory');
     if(sh.getLastRow()>1) return {seeded:false,reason:'Directory already contains rows; no data was overwritten.'};
-    if(CSP_DIRECTORY_SEED.length)sh.getRange(2,1,CSP_DIRECTORY_SEED.length,10).setValues(CSP_DIRECTORY_SEED);
-    return {seeded:true,rows:CSP_DIRECTORY_SEED.length};
+    const directory=privateCspDirectory_();
+    if(!directory.length)throw new Error('Install the separate PRIVATE roster file before importing staff.');
+    sh.getRange(2,1,directory.length,10).setValues(directory);
+    return {seeded:true,rows:directory.length};
   });
 }
 function getDirectory(sessionToken) {
@@ -1493,18 +1560,61 @@ function sitePulseGemini_(prompt) {
   const obj=JSON.parse(result.getContentText());const content=(((obj.candidates||[])[0]||{}).content||{}).parts||[];
   const raw=content.map(function(x){return x.text||'';}).join('');return JSON.parse(raw);
 }
-function interpretWorkVoice(sessionToken,transcript,language) {
-  const ss=db_();requireRole_(ss,['supervisor'],sessionToken);
+function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
+  const ss=db_();const engineer=requireRole_(ss,['supervisor'],sessionToken);
   const speech=text_(transcript,'Transcript',5000,true),lang=text_(language,'Language code',12,true);
+  const ticket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(ticketId)&&String(t.assigned_supervisor_id)===String(engineer.id);});
+  if(!ticket)throw new Error('Select one of your assigned tickets before generating a report.');
   const items=rows_(ss,'Master_Items');
+  const fields=['Masons','Helpers','FC','Etc','Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles','Other Materials','Tractor','Crane','JCB','Scaffolding','Other Equipment'];
   const catalog=items.map(function(i){return {id:i.id,name:i.name,type:i.type,unit:i.rate_unit||'unit'};});
-  const answer=sitePulseGemini_('Extract a civil construction field report from spoken text. Input language: '+lang+'\nCatalog JSON: '+JSON.stringify(catalog)+
-    '\nVoice text: '+speech+'\nReturn a JSON object with workDone (clear accurate English summary), workMeasure (number, default 0), workMeasureUnit (sq.ft/cu.ft/m/other or empty), and lines:[{item_id,quantity}]. Use ONLY catalog ids, nonnegative amounts. Do not invent quantities or unit conversions.');
-  const allowed=Object.fromEntries(items.map(function(i){return [i.id,true];}));
-  const lines=(Array.isArray(answer.lines)?answer.lines:[]).filter(function(l){return allowed[String(l.item_id)]&&Number.isFinite(Number(l.quantity))&&Number(l.quantity)>0;}).slice(0,100)
-    .map(function(l){return {item_id:String(l.item_id),quantity:Number(l.quantity)};});
-  return {work_done:String(answer.workDone||speech).slice(0,3000),work_measure:Math.max(0,Number(answer.workMeasure)||0),work_measure_unit:String(answer.workMeasureUnit||'').slice(0,32),lines:lines,mode:'ai'};
+  const answer=sitePulseGemini_(
+    'You help a civil engineer in '+lang+' create a daily site report. Preserve every numeric quantity and unit EXACTLY, do not convert units or infer values, including words for numbers. '+
+    'Ask at most two short clarifying questions ONLY if work description or completion status is materially ambiguous. '+
+    'If a resource was not mentioned, return Not Used. If a field does not apply, return Not Applicable. '+
+    'Return JSON ONLY with {workDone:string,completionStatus:"completed"|"partially completed"|"in progress",resources:object keyed by exact labels,questions:string[],lines:[{item_id:string,quantity:number}]}. '+
+    'WorkDone must be brief and accurate. In lines, only include a catalog item with an unambiguous, explicitly spoken numerical quantity, never infer or translate word-number to digits. '+
+    'Do not fabricate dates, locations, ticket numbers or names. Exact labels: '+JSON.stringify(fields)+'. Catalog: '+JSON.stringify(catalog)+'. Transcript: '+speech);
+  const allowed=Object.fromEntries(items.map(function(i){return [String(i.id),i];}));
+  const numericalEvidence=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(x){return Number(x[0].replace(/,/g,''));});
+  const lineIds=new Set();
+  const lines=(Array.isArray(answer.lines)?answer.lines:[]).filter(function(l){
+    const id=String(l.item_id||''),quantity=Number(l.quantity);
+    if(!allowed[id]||lineIds.has(id)||!Number.isFinite(quantity)||quantity<=0||numericalEvidence.indexOf(quantity)<0)return false;
+    lineIds.add(id);return true;
+  }).slice(0,60).map(function(l){return {item_id:String(l.item_id),quantity:Number(l.quantity)};});
+  const transcriptDigits=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(m){return m[0];});
+  const questions=Array.isArray(answer.questions)?answer.questions.filter(function(q){return typeof q==='string'&&q.trim();}).slice(0,2).map(function(q){return q.slice(0,240);}):[];
+  const digitNotSpoken=function(value){return Array.from(String(value||'').matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).some(function(m){return transcriptDigits.indexOf(m[0])<0;});};
+  const resources={};fields.forEach(function(label){
+    const value=answer.resources&&answer.resources[label];
+    const found=typeof value==='string'&&value.trim()?value.trim().slice(0,90):'Not Used';
+    if(digitNotSpoken(found)){
+      resources[label]='Not Used';
+      if(questions.length<2)questions.push('Please confirm the quantity and unit for '+label+'.');
+    }else resources[label]=found;
+  });
+  let workDone=String(answer.workDone||'').slice(0,3000).trim();
+  if(digitNotSpoken(workDone)){
+    // Do not use an AI summary that introduced a number missing from the transcript.
+    workDone=speech.slice(0,3000);
+    if(questions.length<2)questions.push('Please confirm the work quantities in your original update.');
+  }
+  const completion=['completed','partially completed','in progress'].indexOf(String(answer.completionStatus||'').toLowerCase())>=0?String(answer.completionStatus).toLowerCase():'in progress';
+  if(!workDone || workDone==='Not Used')questions.unshift('What work was done on site today?');
+  const report=[
+    'DAILY SITE REPORT','Ticket No: '+ticket.jira_ticket_no,'Work Date: '+Utilities.formatDate(new Date(),PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata','dd/MM/yyyy'),
+    'Project Location: '+(ticket.location||'Not Applicable'),'Supervisor name: '+engineer.name,'Work Done:',workDone||'Not Applicable','',
+    'Labours',...fields.slice(0,4).map(function(k){return k+': '+resources[k];}),'',
+    'Materials Used',...fields.slice(4,12).map(function(k){return k+': '+resources[k];}),'',
+    'Equipment Used',...fields.slice(12,17).map(function(k){return k+': '+resources[k];}),'',
+    'Work Completion Status',completion==='completed'?'Completed':completion==='partially completed'?'Partially Completed':'In Progress'
+  ].join('\n');
+  // The entire report remains a draft until the engineer explicitly verifies it.
+  return {reportText:report,work_done:workDone,completion_status:completion,
+    work_measure:0,work_measure_unit:'',lines:lines,questions:questions,resources:resources,mode:'ai'};
 }
+
 function localizeRevision(sessionToken,revisionText,language) {
   const ss=db_();requireRole_(ss,['supervisor'],sessionToken);
   const input=text_(revisionText,'Revision note',1500,true);
@@ -1562,7 +1672,9 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
   'saveTicketLead','syncCspRoster','setTicketPriority','listCivilTickets',
   'interpretWorkVoice','localizeRevision','seedLegacyCspItems',
-  'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels'
+  'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
+  'getLiveUpdates','sendDirectMessage','markDirectMessagesRead','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
+  'renameReportingWorkbookColumn','importScreenshotStaffProfiles'
 ]);
 
 function doPost(e) {
@@ -1579,7 +1691,8 @@ function doPost(e) {
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
       addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority,
       listCivilTickets, interpretWorkVoice, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
-      sendPushTest, saveMenuLabels,
+      sendPushTest, saveMenuLabels, getLiveUpdates, sendDirectMessage,markDirectMessagesRead,
+      saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
     };
     const handler = functions[method];
     if (CSP_PUBLIC_RPC_METHODS.indexOf(method) < 0 || typeof handler !== 'function') {
@@ -1710,7 +1823,7 @@ function sendPushTest(sessionToken) {
 
 
 /** Editable navigation labels: stored in the spreadsheet, never public without a session. */
-const CSP_MENU_KEYS = ['overview','tickets','reports','review','team','inventory','jira','workbook','notifications','settings'];
+const CSP_MENU_KEYS = ['overview','tickets','reports','review','team','inventory','jira','workbook','notifications','messages','settings'];
 function getMenuLabels_(existingSs) {
   const ss = existingSs || db_();
   const entries = rows_(ss,'App_Settings').filter(function(x){return String(x.key).indexOf('menu:')===0;});
@@ -1737,5 +1850,122 @@ function saveMenuLabels(sessionToken,labels) {
     });
     write_(ss,'Audit_Log',{id:newId_(),actor_id:admin.id,action:'menu_labels_updated',target_id:'navigation',created_at:new Date().toISOString(),before_json:JSON.stringify(previous).slice(0,44000),after_json:JSON.stringify(saved).slice(0,44000)});
     return {ok:true,menuLabels:Object.assign({},previous,saved)};
+  });
+}
+
+
+/** Scoped read-only updates, lightweight enough for visible-tab polling. */
+function getLiveUpdates(sessionToken){
+  const ss=db_();const user=identity_(ss,sessionToken);
+  const allItems=rows_(ss,'Master_Items').map(publicRow_);
+  const items=user.role==='supervisor' ? allItems.map(function(i){return {id:i.id,type:i.type,name:i.name,rate_unit:i.rate_unit||'unit'};}) : allItems;
+  const contacts=rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';})
+    .map(function(u){return {id:u.id,name:u.name,role:u.role};});
+  return {tickets:scopedTickets_(ss,user),reports:reportsFor_(ss,user),notifications:notificationRows_(ss,user.id),
+    messages:messagesFor_(ss,user.id),items:items,contacts:contacts,
+    itemRates:user.role==='supervisor'?[]:rows_(ss,'Item_Rates').map(publicRow_).slice(-750).reverse()};
+}
+function messagesFor_(ss,userId){
+  return rows_(ss,'Direct_Messages').filter(function(m){return String(m.sender_id)===String(userId)||String(m.recipient_id)===String(userId);})
+    .sort(function(a,b){return String(b.created_at).localeCompare(String(a.created_at));}).slice(0,150).reverse().map(publicRow_);
+}
+function sendDirectMessage(sessionToken,recipientId,body){
+  return transaction_(function(ss){
+    const sender=requireRole_(ss,USER_ROLES,sessionToken);
+    const to=rows_(ss,'Users').find(function(u){return String(u.id)===String(recipientId)&&u.email&&String(u.account_status||'active')==='active';});
+    if(!to||String(to.id)===String(sender.id))throw new Error('Choose an active recipient.');
+    const message={id:newId_(),sender_id:sender.id,recipient_id:to.id,body:text_(body,'Message',1500,true),created_at:new Date().toISOString(),read_at:''};
+    write_(ss,'Direct_Messages',message);
+    notify_(ss,to.id,sender.id,'direct_message','Message from '+sender.name,message.body.slice(0,160),'message',message.id);
+    return publicRow_(message);
+  });
+}
+function markDirectMessagesRead(sessionToken,peerId){
+  return transaction_(function(ss){
+    const actor=identity_(ss,sessionToken);let count=0;
+    rows_(ss,'Direct_Messages').filter(function(m){return String(m.recipient_id)===String(actor.id)&&String(m.sender_id)===String(peerId)&&!m.read_at;}).forEach(function(m){m.read_at=new Date().toISOString();write_(ss,'Direct_Messages',m);count++;});
+    return {count:count};
+  });
+}
+function validBirthDate_(value){
+  const date=String(value||'').trim();if(!date)return '';
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(new Date(date+'T00:00:00Z').valueOf())||new Date(date+'T00:00:00Z').toISOString().slice(0,10)!==date||date>new Date().toISOString().slice(0,10))throw new Error('Enter a valid past birth date.');
+  return date;
+}
+function validPhoto_(value){
+  const photo=String(value||'');if(!photo)return '';
+  if(photo.length>28000||!/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(photo))throw new Error('Choose a smaller JPEG or PNG photo.');
+  return photo;
+}
+function saveMyProfile(sessionToken,payload){
+  return transaction_(function(ss){
+    const me=identity_(ss,sessionToken);
+    if(!payload||typeof payload!=='object')throw new Error('Invalid profile.');
+    if(String(payload.email||'').trim().toLowerCase()!==String(me.email).toLowerCase())throw new Error('Verify your new email separately before saving it.');
+    me.name=text_(payload.name,'Name',100,true);
+    me.mobile_number=text_(payload.mobile_number||'','Mobile number',30,false);
+    me.birth_date=validBirthDate_(payload.birth_date||'');me.photo_data=validPhoto_(payload.photo_data||'');
+    write_(ss,'Users',me);
+    return publicRow_(me);
+  });
+}
+function requestProfileEmailChange(sessionToken,emailInput){
+  const ss=db_();const me=identity_(ss,sessionToken);const next=loginEmail_(emailInput);
+  if(next===String(me.email).toLowerCase())throw new Error('This is already your current email.');
+  if(rows_(ss,'Users').some(function(u){return String(u.email).toLowerCase()===next;}))throw new Error('Email is already used by another staff member.');
+  const key='profile-email:'+digest_(sessionToken).slice(0,40);
+  const cache=CacheService.getScriptCache();if(cache.get(key+':cooldown'))throw new Error('Please wait one minute before requesting another code.');
+  const nonce=Utilities.getUuid(),code=makeLoginCode_();
+  cache.put(key,JSON.stringify({next:next,hash:digest_(nonce+':'+code),nonce:nonce,attempts:0}),600);cache.put(key+':cooldown','1',60);
+  MailApp.sendEmail({to:next,subject:'Confirm your CSP SitePulse email update',body:'Your confirmation code is '+code+'\nIt expires in 10 minutes. Do not share it.',name:'CSP SitePulse'});
+  return {sent:true};
+}
+function confirmProfileEmailChange(sessionToken,newEmail,code){
+  const key='profile-email:'+digest_(sessionToken).slice(0,40);
+  const cache=CacheService.getScriptCache();const stored=cache.get(key);if(!stored)throw new Error('Email verification expired; request a new code.');
+  const entry=JSON.parse(stored);entry.attempts++;
+  if(entry.attempts>5){cache.remove(key);throw new Error('Too many attempts.');}
+  if(entry.next!==loginEmail_(newEmail)||!/^[0-9]{8}$/.test(String(code||''))||entry.hash!==digest_(entry.nonce+':'+String(code))){cache.put(key,JSON.stringify(entry),600);throw new Error('Wrong code.');}
+  const changed=transaction_(function(ss){
+    const me=identity_(ss,sessionToken);
+    if(rows_(ss,'Users').some(function(u){return String(u.email).toLowerCase()===entry.next&&String(u.id)!==String(me.id);}))throw new Error('Email is already registered.');
+    const old=me.email;me.email=entry.next;write_(ss,'Users',me);
+    // Keep the current verified session valid, revoke others after an email identity change.
+    const sessions=rows_(ss,'Sessions').filter(function(r){return String(r.user_id)===String(me.id);});
+    sessions.sort(function(a,b){return b._row-a._row;}).forEach(function(r){if(r.token_hash===digest_(sessionToken)){r.email=entry.next;write_(ss,'Sessions',r);}else ss.getSheetByName('Sessions').deleteRow(r._row);});
+    write_(ss,'Audit_Log',{id:newId_(),actor_id:me.id,action:'profile_email_changed',target_id:me.id,created_at:new Date().toISOString(),before_json:JSON.stringify({email:old}),after_json:JSON.stringify({email:entry.next})});
+    return {email:entry.next};
+  });
+  cache.remove(key);return changed;
+}
+
+/** Uses the supplied screenshot-derived directory; ambiguous lead mappings remain unassigned. */
+function seedScreenshotProfilesSheet_(ss){
+  const sheet=ss.getSheetByName('CSP_Staff_Profiles');
+  if(!sheet||sheet.getLastRow()>1)return;
+  const entries=[];
+  privateCspDirectory_().forEach(function(row){
+    if(row[1])entries.push(['supervisor',String(row[3]),String(row[1]),String(row[2]),'', 'pending review','supplied roster screenshot']);
+    if(row[4]&&row[6]&&!entries.some(function(e){return e[2]===row[4];}))entries.push(['lead',String(row[6]),String(row[4]),String(row[5]),'','pending review','supplied roster screenshot']);
+    if(row[7]&&!entries.some(function(e){return e[2]===row[7];})){
+      const first=String(row[7]).split('@')[0].split('.')[0];
+      entries.push(['admin',first.charAt(0).toUpperCase()+first.slice(1),String(row[7]),String(row[8]),'','pending review','supplied roster screenshot']);
+    }
+  });
+  if(entries.length){sheet.getRange(2,1,entries.length,TABLES.CSP_Staff_Profiles.length).setValues(entries);sheet.setFrozenRows(1);sheet.setColumnWidths(1,7,150);sheet.setColumnWidth(3,280);}
+}
+function importScreenshotStaffProfiles(sessionToken){
+  return transaction_(function(ss){
+    requireRole_(ss,['admin'],sessionToken);seedScreenshotProfilesSheet_(ss);
+    const sheet=ss.getSheetByName('CSP_Staff_Profiles');
+    const existing=rows_(ss,'Users');const entries=rows_(ss,'CSP_Staff_Profiles');let created=0,skipped=0;
+    if(!entries.length)throw new Error('No staff profiles to import. Install the separate PRIVATE roster file in Google Apps Script, then run seedPrivateCspStaff().');
+    entries.forEach(function(r){
+      const email=String(r.email||'').trim().toLowerCase();
+      if(!email||!String(r.name||'').trim()||existing.some(function(u){return String(u.email).toLowerCase()===email;})){skipped++;return;}
+      const user={id:newId_(),role:String(r.role),name:String(r.name),email:email,manager_id:'',can_supervise:r.role==='supervisor',acting_lead_id:'',mobile_number:String(r.mobile_number||''),birth_date:'',photo_data:'',account_status:'pending'};
+      write_(ss,'Users',user);existing.push(user);created++;
+    });
+    return {created:created,skipped:skipped,notice:'Imported staff accounts are pending. Review names, emails, leads and activate each account explicitly.'};
   });
 }

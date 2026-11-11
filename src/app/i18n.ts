@@ -6,7 +6,7 @@ export const LANGUAGES:{code:Lang;label:string}[] = [
   {code:'hi-IN',label:'हिन्दी'}, {code:'ml-IN',label:'മലയാളം'}
 ];
 const en = {
-  overview:'Overview',tickets:'Tickets',reports:'Daily reports',review:'Approvals',team:'People',inventory:'Resources',jira:'Jira desk',workbook:'Workbook',notifications:'Notifications',settings:'Settings',
+  overview:'Overview',tickets:'Tickets',reports:'Daily reports',review:'Approvals',team:'People',inventory:'Resources',jira:'Jira desk',workbook:'Workbook',notifications:'Notifications',messages:'Messages',settings:'Settings',
   hello:'Welcome back',today:'Field operations at a glance',signIn:'Sign in',email:'Email address',requestCode:'Send sign-in code',code:'8-digit sign-in code',verify:'Verify and enter',logout:'Sign out',
   search:'Search tickets, people or locations',refresh:'Refresh',sync:'Sync tickets',supervisor:'Supervisor',allSupervisors:'All supervisors',filter:'Filter',all:'All',
   newReport:'Create report',workDone:'Work performed',status:'Status',workMeasure:'Work quantity',unit:'Unit',materials:'Resource quantities',addItem:'Add resource',
@@ -40,9 +40,9 @@ export const NAV: {section:Section;icon:string;roles:('admin'|'lead'|'supervisor
  {section:'reports',icon:'▤',roles:['admin','lead','supervisor']},
  {section:'review',icon:'✓',roles:['lead']},
  {section:'team',icon:'♙',roles:['admin']},
- {section:'inventory',icon:'▦',roles:['admin']},
+ {section:'inventory',icon:'▦',roles:['admin','lead']},
  {section:'jira',icon:'⌘',roles:['admin']},
  {section:'workbook',icon:'▥',roles:['admin']},
- {section:'notifications',icon:'♢',roles:['admin','lead','supervisor']},
+ {section:'messages',icon:'✉',roles:['admin','lead','supervisor']},
  {section:'settings',icon:'⚙',roles:['admin','lead','supervisor']}
 ];

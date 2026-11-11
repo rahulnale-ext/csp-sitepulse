@@ -91,3 +91,13 @@ The Worker forwards this shape to Apps Script and returns `{ "ok": true, "result
 ## 6. Suggested acceptance checks
 
 Test with **separate accounts** for admin, lead and supervisor; check an invalid/expired OTP and logout; test role isolation on requests; run one manual and one selection-triggered CIVIL sync; verify Jira detail fields; submit and revise a report in all seven spoken languages; compare each AI-generated quantity with the transcript; exercise push foreground/background/notification-click on Chrome, Edge, Safari and Android browsers where supported; test 320/375/768/1440px widths; verify workbook formula preservation and that secrets never appear in bundled JS.
+
+## November 2026 update (v2): Start here
+
+For an **existing CSP SitePulse installation**, follow **`UPGRADE_STEPS.md`**, not the first-time installation steps above.
+
+New screens and behavior: Jira-style table with the source column labels and ticket facets, supervisor/location/created-date filters, source-supervisor assignment matching during Jira sync, notification bell dropdown (no floating in-app toast and no dedicated notifications menu), 12-second active-tab scoped refresh, push refresh, one-to-one messaging, multilingual voice-derived Daily Site Report preview and limited follow-up questions, no fabricated quantities, partial-completion preservation, profile editing with verified email changes, category-wise old/new rate history, workbook heading renaming, and pending-review staff import.
+
+The supplied staff screenshots contain **private emails and phone numbers**. To avoid putting these in a potentially **public GitHub repository**, the personal roster is **not embedded in `backend/Code.gs` or this ZIP**. Instead, use the separately supplied private file `CSP-PRIVATE-STAFF-SETUP.gs` **only within your private Google Apps Script project**. Run `seedPrivateCspStaff()` after `setupProject()` and check `CSP_Staff_Profiles`. Then use **Team → Import provided staff**. New accounts are inactive/pending until reviewed by an administrator; supervisor reporting leads are not guessed.
+
+**Limits and required verification:** Jira-specific custom-field IDs cannot be derived from screenshots; set the correct `JIRA_*_FIELD` Script Properties and sync Jira. Firebase push is best-effort, and external Jira changes are not instantly pushed into the app without Jira sync/webhook integration. The new screens have passed static JavaScript/TypeScript/contract checks but **not** a production Angular build, actual browser/device testing, or live Jira/Gemini/FCM tests (the dependency install was unavailable here). Use test records and verify before rollout.
