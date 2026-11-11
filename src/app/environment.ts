@@ -1,6 +1,6 @@
 /** Public frontend configuration only. Never put Jira/Gemini/FCM server credentials here. */
 export const environment = {
-  apiUrl: 'https://YOUR-CLOUDFLARE-WORKER.workers.dev/',
+  apiUrl: 'https://csp-sitepulse-api.csp-sitepulse-api.workers.dev/',
   firebase: {
     apiKey: 'YOUR_PUBLIC_FIREBASE_API_KEY',
     authDomain: 'YOUR-PROJECT.firebaseapp.com',
