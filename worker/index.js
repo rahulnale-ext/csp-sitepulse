@@ -1,6 +1,6 @@
 /** Origin-restricted proxy. Apps Script validates sessions and roles on every call. */
 const allowedMethods = new Set(['POST','OPTIONS']);
-const maxBytes = 120000;
+const maxBytes = 1500000;
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';

@@ -9,7 +9,7 @@ const TABLES = Object.freeze({
   Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id', 'mobile_number', 'birth_date', 'photo_data', 'account_status'],
   Master_Items: ['id', 'type', 'name', 'current_price', 'quantity', 'rate_unit'],
   Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee', 'jira_assignment_group'],
-  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date'],
+  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date', 'source_transcript', 'source_language'],
   Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit', 'rate_id', 'rate_date', 'rate_source', 'rate_note'],
   Notifications: ['id', 'recipient_id', 'actor_id', 'type', 'title', 'body', 'target_kind', 'target_id', 'created_at', 'read_at'],
   Push_Subscriptions: ['id', 'user_id', 'token', 'device_label', 'created_at', 'updated_at'],
@@ -465,7 +465,7 @@ function reportsFor_(ss, user) {
     const view = {id:r.id, ticket_id:r.ticket_id, supervisor_id:r.supervisor_id,
       ticket_no:ticket.jira_ticket_no || 'Unknown ticket', location:ticket.location || '',
       supervisor_name:supervisor.name || 'Unknown user', date:r.date,work_date:r.work_date||String(r.date).slice(0,10),
-      work_done:r.work_done,daily_report_text:r.daily_report_text||'', completion_status:r.completion_status, status:r.status,
+      work_done:r.work_done,daily_report_text:r.daily_report_text||'', source_transcript:r.source_transcript||'', source_language:r.source_language||'', completion_status:r.completion_status, status:r.status,
       revision_note:r.revision_note || '', revision_count:Number(r.revision_count || 0),
       work_measure:Number(r.work_measure||0),work_measure_unit:r.work_measure_unit||'',
       lines:byReport[String(r.id)] || []};
@@ -729,10 +729,15 @@ function dailyReportText_(payload,ticket,sup){
     text.indexOf('Equipment Used')<0||text.indexOf('Work Completion Status')<0){
     throw new Error('The daily site report preview is incomplete. Generate and verify it before submitting.');
   }
-  return text;
+  // Always store the final reviewed English Work Done, not an older local-language preview.
+  const english=text_(payload.work_done,'English Work Done',3000,true);
+  return text.replace(/(Work Done:\s*\n)[\s\S]*?(\n\nLabours\b)/,function(_,head,tail){return head+english+tail;});
 }
 function submitReport(sessionToken,payload) {
   if (!payload || typeof payload!=='object') throw new Error('Invalid report.');
+  // Authenticate BEFORE any paid translation request.
+  requireRole_(db_(),['supervisor'],sessionToken);
+  payload=Object.assign({},payload,{work_done:cspEnglishWork_(payload.work_done)});
   return transaction_(function(ss) {
     const sup=requireRole_(ss,['supervisor'],sessionToken);
     const ticket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(payload.ticket_id);});
@@ -752,7 +757,7 @@ function submitReport(sessionToken,payload) {
     if(!reviewer||String(reviewer)===String(sup.id)||!rows_(ss,'Users').some(function(u){return u.role==='lead'&&String(u.id)===String(reviewer);}))throw new Error('Choose a separate reviewing lead for this ticket before submitting a report.');
     const report={id:newId_(),ticket_id:ticket.id,supervisor_id:sup.id,date:new Date().toISOString(),work_date:siteDate_(payload.work_date||Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd'),'Work date',true),
       approver_id:reviewer,work_measure:number_(payload.work_measure||0,'Work quantity',true),work_measure_unit:text_(payload.work_measure_unit||'','Work unit',32,false),
-      work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),completion_status:completion,
+      work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),source_transcript:String(payload.source_transcript||'').slice(0,5000),source_language:String(payload.source_language||''),completion_status:completion,
       amount_of_work:money_(lines.reduce(function(total,l){return total+l.quantity*l.locked_price;},0)),
       status:'pending',revision_note:'',revision_count:0};
     write_(ss,'Reports',report);
@@ -781,6 +786,8 @@ function requestRevision(sessionToken,reportId,noteInput) {
 }
 function reviseReport(sessionToken,reportId,payload) {
   if (!payload || typeof payload!=='object') throw new Error('Invalid revision.');
+  requireRole_(db_(),['supervisor'],sessionToken);
+  payload=Object.assign({},payload,{work_done:cspEnglishWork_(payload.work_done)});
   return transaction_(function(ss) {
     const sup=requireRole_(ss,['supervisor'],sessionToken);
     const report=rows_(ss,'Reports').find(function(r){return String(r.id)===String(reportId);});
@@ -790,6 +797,8 @@ function reviseReport(sessionToken,reportId,payload) {
     const completion=String(payload.completion_status||'').toLowerCase();
     if (COMPLETION_STATES.indexOf(completion)<0) throw new Error('Invalid completion status.');
     report.work_done=text_(payload.work_done,'Work performed',3000,true);
+    report.source_transcript=String(payload.source_transcript||report.source_transcript||'').slice(0,5000);
+    report.source_language=String(payload.source_language||report.source_language||'');
     const currentTicket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(report.ticket_id);});
     report.daily_report_text=dailyReportText_(payload,currentTicket,sup);
     report.completion_status=completion;
@@ -852,7 +861,7 @@ function adminUpdateReport(sessionToken,reportId,payload) {
     if(!report)throw new Error('Report not found.');
     if(!payload||typeof payload!=='object')throw new Error('Invalid edit.');
     const before=Object.assign({},report);
-    report.work_done=text_(payload.work_done,'Work description',3000,true);
+    report.work_done=cspEnglishWork_(payload.work_done);
     const completion=String(payload.completion_status||'');
     if(COMPLETION_STATES.indexOf(completion)===-1)throw new Error('Invalid completion status.');
     report.completion_status=completion;
@@ -1635,17 +1644,21 @@ function listCivilTickets(sessionToken,section) {
 /** Optional Gemini integration; enabled only when GEMINI_API_KEY is configured.
  * Spoken text is transmitted to the configured Google model ONLY when the supervisor clicks Analyse.
  */
-function sitePulseGemini_(prompt) {
+function sitePulseGemini_(prompt,audio) {
   const p=PropertiesService.getScriptProperties(),key=p.getProperty('GEMINI_API_KEY');
   if(!key)throw new Error('AI is not configured. Use the manual entry controls.');
   const configured=String(p.getProperty('GEMINI_MODEL')||'gemini-2.5-flash').replace(/^models\//,'');
   if(!/^[a-z0-9._-]+$/i.test(configured))throw new Error('Invalid AI model setting.');
   const base='https://generativelanguage.googleapis.com/v1beta/models/';
   const headers={'x-goog-api-key':key};
-  const request=function(model){return UrlFetchApp.fetch(base+encodeURIComponent(model)+':generateContent',{
-    method:'post',contentType:'application/json',headers:headers,muteHttpExceptions:true,
-    payload:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.1,responseMimeType:'application/json'}})
-  });};
+  const request=function(model){
+    const parts=[{text:prompt}];
+    if(audio)parts.push({inlineData:{mimeType:audio.mime,data:audio.data}});
+    return UrlFetchApp.fetch(base+encodeURIComponent(model)+':generateContent',{
+      method:'post',contentType:'application/json',headers:headers,muteHttpExceptions:true,
+      payload:JSON.stringify({contents:[{parts:parts}],generationConfig:{temperature:0.1,responseMimeType:'application/json'}})
+    });
+  };
   let model=configured,response=request(model);
   // HTTP 404 usually means the configured model is not available to this particular API key.
   // Ask Google for supported models and retry a compatible model, rather than guessing names.
@@ -1699,38 +1712,92 @@ function cspLiteralSpeech_(speech,items){
     questions: /\b(completed|finished|partially\s+completed|in progress|ongoing)\b/.test(low)?[]:['Was the work completed, partially completed, or in progress?'],
     lines:matched};
 }
-function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
+/** Voice can be supplied as text (accessibility/manual) or as a short microphone recording.
+ * Recording stays in memory, is sent only on Generate report, and is not stored in Sheets.
+ */
+function interpretWorkVoice(sessionToken,transcript,language,ticketId,workDate) {
+  return cspInterpretSiteUpdate_(sessionToken,transcript,language,ticketId,workDate,null);
+}
+function interpretWorkAudio(sessionToken,audioBase64,audioMime,language,ticketId,workDate) {
+  // Validate before any external API request; the session/role is checked inside the shared function.
+  const mime=String(audioMime||'').split(';')[0].toLowerCase();
+  if(['audio/webm','audio/mp4','audio/ogg','audio/wav','audio/mpeg'].indexOf(mime)<0)
+    throw new Error('Unsupported recording format. Try Chrome or enter the transcript manually.');
+  const raw=String(audioBase64||'');
+  if(raw.length<100 || raw.length>1050000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(raw))
+    throw new Error('The recording is missing or too large. Record a shorter site update (up to 45 seconds).');
+  return cspInterpretSiteUpdate_(sessionToken,'',language,ticketId,workDate,{mime:mime,data:raw});
+}
+function cspInterpretSiteUpdate_(sessionToken,transcript,language,ticketId,workDate,audio) {
   const ss=db_();const engineer=requireRole_(ss,['supervisor'],sessionToken);
-  const speech=text_(transcript,'Transcript',5000,true),lang=text_(language,'Language code',12,true);
+  const lang=text_(language,'Language code',12,true);
+  const languageNames={'en-IN':'English','ta-IN':'Tamil','kn-IN':'Kannada','te-IN':'Telugu',
+    'bn-IN':'Bengali','mr-IN':'Marathi','hi-IN':'Hindi','ml-IN':'Malayalam'};
+  if(!languageNames[lang])throw new Error('Select a supported voice language.');
+  let speech=audio?'':text_(transcript,'Transcript',5000,true);
   const ticket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(ticketId)&&String(t.assigned_supervisor_id)===String(engineer.id);});
   if(!ticket)throw new Error('Select one of your assigned tickets before generating a report.');
+  const timezone=PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata';
+  const selectedWorkDate=siteDate_(workDate||Utilities.formatDate(new Date(),timezone,'yyyy-MM-dd'),'Work date',true);
   const items=rows_(ss,'Master_Items');
   const fields=['Masons','Helpers','FC','Etc','Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles','Other Materials','Tractor','Crane','JCB','Scaffolding','Other Equipment'];
   const catalog=items.map(function(i){return {id:i.id,name:i.name,type:i.type,unit:i.rate_unit||'unit'};});
   let answer,mode='ai',warning='';
-  try {answer=sitePulseGemini_(
-    'You help a civil engineer in '+lang+' create a daily site report. Preserve every numeric quantity and unit EXACTLY, do not convert units or infer values, including words for numbers. '+
-    'Ask at most two short clarifying questions ONLY if work description or completion status is materially ambiguous. '+
-    'If a resource was not mentioned, return Not Used. If a field does not apply, return Not Applicable. '+
-    'Return JSON ONLY with {workDone:string,completionStatus:"completed"|"partially completed"|"in progress",resources:object keyed by exact labels,questions:string[],lines:[{item_id:string,quantity:number}]}. '+
-    'WorkDone must be brief and accurate. In lines, only include a catalog item with an unambiguous, explicitly spoken numerical quantity, never infer or translate word-number to digits. '+
-    'Do not fabricate dates, locations, ticket numbers or names. Exact labels: '+JSON.stringify(fields)+'. Catalog: '+JSON.stringify(catalog)+'. Transcript: '+speech);
+  try {
+    answer=sitePulseGemini_(
+      'Interpret a daily CIVIL construction site '+(audio?'AUDIO recording':'TRANSCRIPT')+' in '+languageNames[lang]+
+      ' (including regional accents, code-switching, and construction shorthand). '+
+      'If audio is supplied, transcribe what was actually said in the ORIGINAL language/script, word for word, in transcript. '+
+      'If text is supplied, preserve the original text exactly in transcript. '+
+      'Recognize construction terms by meaning and catalog context, not by superficial spelling. Common local variants include mastri/mestri (mason), '+
+      'coolie/helper, cement bags, M-sand, P-sand, jalli/jelly/chips, bricks, solid blocks, tiles, tractor, crane, JCB, scaffolding. '+
+      'FC is a distinct labour category; do not guess what it means. '+
+      'Translate Work Done into fluent, plain ENGLISH for the Admin/Lead. Never return local-script text in workDoneEnglish. '+
+      'Preserve the meaning and ALL quantities/units. Never invent work, material use, units, numbers, dates or status. '+
+      'Only match a catalog resource when the spoken quantity AND item are clear. '+
+      'For numbers spoken as local-language words, include evidence: the EXACT phrase in the transcript that contains that number and item, '+
+      'and output its numerical value only when certain. For digit quantities evidence must still include the matching item phrase. '+
+      'Ask at most two essential questions when status or an important quantity is unclear. Unmentioned fields should be Not Used. '+
+      'Return JSON ONLY with {transcript:string,workDoneEnglish:string,completionStatus:"completed"|"partially completed"|"in progress",'+
+      'resources:object keyed by exact labels,questions:string[],lines:[{item_id:string,quantity:number,evidence:string}]}. '+
+      'Write the resources quantities in digits with their spoken unit, without converting units. '+
+      'If completion status was not said, ask a question, and use in progress as the temporary UI placeholder only. '+
+      'Labels: '+JSON.stringify(fields)+'. Actual catalog: '+JSON.stringify(catalog)+
+      '. Work ticket location (context only): '+String(ticket.location||'')+
+      '. Selected language: '+lang+'. Supplied transcript: '+speech,
+      audio);
+    if(audio){
+      const recognized=String(answer.transcript||'').trim();
+      if(!recognized)throw new Error('No speech was recognized from the recording. Please try again in a quieter location.');
+      speech=text_(recognized,'Recognized transcript',5000,true);
+    }
   }catch(error){
+    if(audio)throw new Error('Unable to interpret the recording. You can type the local-language transcript and retry. '+String(error&&error.message||error));
     mode='literal';answer=cspLiteralSpeech_(speech,items);
-    warning='AI interpretation unavailable: generated only from explicitly typed/spoken numbers and recognizable English item names. Verify every resource, and manually add anything missed. For local languages, enter resources manually until the AI connection is fixed.';
-    console.warn('Gemini generation fallback: '+String(error&&error.message||error));
+    warning='AI interpretation/English translation unavailable. Only clear English item names and digit quantities were extracted. '+
+      'If the Work Done is in a local language, enter a verified English description before submitting; check all values.';
+    console.warn('Gemini interpretation unavailable: '+String(error&&error.message||error));
   }
   const allowed=Object.fromEntries(items.map(function(i){return [String(i.id),i];}));
   const numericalEvidence=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(x){return Number(x[0].replace(/,/g,''));});
+  const acceptedFromWords=new Set();
   const lineIds=new Set();
   const lines=(Array.isArray(answer.lines)?answer.lines:[]).filter(function(l){
-    const id=String(l.item_id||''),quantity=Number(l.quantity);
-    if(!allowed[id]||lineIds.has(id)||!Number.isFinite(quantity)||quantity<=0||numericalEvidence.indexOf(quantity)<0)return false;
+    const id=String(l.item_id||''),quantity=Number(l.quantity),evidence=String(l.evidence||'').trim();
+    if(!allowed[id]||lineIds.has(id)||!Number.isFinite(quantity)||quantity<=0)return false;
+    const digitExplicit=numericalEvidence.indexOf(quantity)!==-1;
+    // For regional number words, evidence must be an exact excerpt from the transcript;
+    // the supervisor still checks each interpreted number before submission.
+    const wordEvidence=mode==='ai'&&evidence.length>=5&&speech.toLocaleLowerCase().indexOf(evidence.toLocaleLowerCase())!==-1;
+    if(!digitExplicit&&!wordEvidence)return false;
+    if(!digitExplicit&&wordEvidence)acceptedFromWords.add(quantity);
     lineIds.add(id);return true;
   }).slice(0,60).map(function(l){return {item_id:String(l.item_id),quantity:Number(l.quantity)};});
-  const transcriptDigits=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(m){return m[0];});
+  const transcriptDigits=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(m){return Number(m[0].replace(/,/g,''));});
   const questions=Array.isArray(answer.questions)?answer.questions.filter(function(q){return typeof q==='string'&&q.trim();}).slice(0,2).map(function(q){return q.slice(0,240);}):[];
-  const digitNotSpoken=function(value){return Array.from(String(value||'').matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).some(function(m){return transcriptDigits.indexOf(m[0])<0;});};
+  const digitNotSpoken=function(value){return Array.from(String(value||'').matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).some(function(m){
+    const n=Number(m[0].replace(/,/g,''));return transcriptDigits.indexOf(n)<0&&!acceptedFromWords.has(n);
+  });};
   const resources={};fields.forEach(function(label){
     const value=answer.resources&&answer.resources[label];
     const found=typeof value==='string'&&value.trim()?value.trim().slice(0,90):'Not Used';
@@ -1739,8 +1806,6 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
       if(questions.length<2)questions.push('Please confirm the quantity and unit for '+label+'.');
     }else resources[label]=found;
   });
-  // Some models provide field quantities but omit resource IDs. Resolve only exact
-  // numeric quantities that already occur in the transcript; never invent amounts.
   const added=new Set(lines.map(function(l){return String(l.item_id);}));
   fields.forEach(function(label){
     const item=items.find(function(i){return String(i.name).toLowerCase()===label.toLowerCase();});
@@ -1749,27 +1814,46 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
     if(!m)return;const value=Number(m[1]);
     if(value>0&&numericalEvidence.indexOf(value)!==-1){lines.push({item_id:String(item.id),quantity:value});added.add(String(item.id));}
   });
-  let workDone=String(answer.workDone||'').slice(0,3000).trim();
+  let workDone=String(answer.workDoneEnglish||answer.workDone||'').slice(0,3000).trim();
+  if(mode==='literal'&&lang!=='en-IN'){
+    // Even transliterated local speech is NOT guaranteed to be English.
+    // Leave the English field blank for manual correction if Gemini is offline.
+    workDone='';
+  }
+  if(cspIndicScript_(workDone))workDone='';
   if(digitNotSpoken(workDone)){
-    // Do not use an AI summary that introduced a number missing from the transcript.
-    workDone=speech.slice(0,3000);
-    if(questions.length<2)questions.push('Please confirm the work quantities in your original update.');
+    workDone='';
+    warning='An unverified number was removed from the English Work Done. Enter the correct English work and numbers manually.';
   }
   const completion=['completed','partially completed','in progress'].indexOf(String(answer.completionStatus||'').toLowerCase())>=0?String(answer.completionStatus).toLowerCase():'in progress';
-  if(!workDone || workDone==='Not Used')questions.unshift('What work was done on site today?');
+  // The user can fill English Work Done manually even if AI is unavailable.
+  // Use the explicit verification control before submission.
+  if(mode==='literal')questions.length=0;
+  if(mode==='ai'&&lang!=='en-IN'){
+    warning='English Work Done prepared from '+languageNames[lang]+'. Review the translation and every quantity before submission.';
+  }
   const report=[
-    'DAILY SITE REPORT','Ticket No: '+ticket.jira_ticket_no,'Work Date: '+String(payload.work_date||Utilities.formatDate(new Date(),PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata','yyyy-MM-dd')).split('-').reverse().join('/'),
+    'DAILY SITE REPORT','Ticket No: '+ticket.jira_ticket_no,'Work Date: '+selectedWorkDate.split('-').reverse().join('/'),
     'Project Location: '+(ticket.location||'Not Applicable'),'Supervisor name: '+engineer.name,'Work Done:',workDone||'Not Applicable','',
     'Labours',...fields.slice(0,4).map(function(k){return k+': '+resources[k];}),'',
     'Materials Used',...fields.slice(4,12).map(function(k){return k+': '+resources[k];}),'',
     'Equipment Used',...fields.slice(12,17).map(function(k){return k+': '+resources[k];}),'',
     'Work Completion Status',completion==='completed'?'Completed':completion==='partially completed'?'Partially Completed':'In Progress'
   ].join('\n');
-  // The entire report remains a draft until the engineer explicitly verifies it.
-  return {reportText:report,work_done:workDone,completion_status:completion,
-    work_measure:0,work_measure_unit:'',lines:lines,questions:questions,resources:resources,mode:mode,warning:warning};
+  return {reportText:report,work_done:workDone,source_transcript:speech,source_language:lang,
+    completion_status:completion,work_measure:0,work_measure_unit:'',lines:lines,questions:questions,resources:resources,mode:mode,warning:warning};
 }
-
+/** Detect regional script; never silently pass untranslated text to Admin/Lead. */
+function cspIndicScript_(s){return /[\u0900-\u0DFF]/.test(String(s||''));}
+function cspEnglishWork_(value){
+  const candidate=text_(value,'Work Done in English',3000,true);
+  if(!cspIndicScript_(candidate))return candidate;
+  const result=sitePulseGemini_('Translate this site work description accurately into concise ENGLISH. '+
+    'Retain every quantity, unit and construction item. Do not invent anything. Return JSON {"english":"..."}. Original: '+candidate);
+  const translated=String(result.english||'').trim();
+  if(!translated||cspIndicScript_(translated))throw new Error('English translation unavailable. Please enter Work Done in English before submitting.');
+  return text_(translated,'English translation',3000,true);
+}
 function localizeRevision(sessionToken,revisionText,language) {
   const ss=db_();requireRole_(ss,['supervisor'],sessionToken);
   const input=text_(revisionText,'Revision note',1500,true);
@@ -1826,7 +1910,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'seedCspDirectory','getDirectory','saveDirectoryCell','addDirectoryRow',
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
   'saveTicketLead','syncCspRoster','setTicketPriority','listCivilTickets',
-  'interpretWorkVoice','localizeRevision','seedLegacyCspItems',
+  'interpretWorkVoice','interpretWorkAudio','localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
   'getLiveUpdates','getDirectMessages','sendDirectMessage','markDirectMessagesRead','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
   'renameReportingWorkbookColumn','importScreenshotStaffProfiles',
@@ -1835,7 +1919,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
 
 function doPost(e) {
   try {
-    if (!e || !e.postData || String(e.postData.contents || '').length > 120000) throw new Error('Invalid request size.');
+    if (!e || !e.postData || String(e.postData.contents || '').length > 1500000) throw new Error('Invalid request size.');
     const request = JSON.parse(e.postData.contents);
     const method = String(request.method || '');
     const functions = {
@@ -1846,7 +1930,7 @@ function doPost(e) {
       listJiraQueueIssues, getReportingWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
       addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority,
-      listCivilTickets, interpretWorkVoice, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
+      listCivilTickets, interpretWorkVoice, interpretWorkAudio, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
       sendPushTest, saveMenuLabels, getLiveUpdates,getDirectMessages,sendDirectMessage,markDirectMessagesRead,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
       getFirestoreChatToken,notifyFirestoreMessage,markFirestoreNotificationsRead,migrateLegacyMessagesToFirestore,

@@ -1,3 +1,36 @@
+# CSP SitePulse V4.1 — Local-language voice reports with English reviewer output
+
+**Upgrade scope:** This builds on the V4 report-fix release. Message, Jira, price, reporting and login features are retained. The previous private environment settings are NOT included and must be preserved from your working repository.
+
+## Voice-report changes
+
+- On browsers supporting microphone recording (Chrome and compatible devices), **Start speaking** captures a short in-memory audio clip (maximum 45 seconds). **Stop** finishes the recording; **Generate report** sends it to Gemini through the existing Cloudflare → Apps Script API. This can understand accents and code-switching from the actual audio rather than relying exclusively on browser speech-to-text.
+- If recording is unavailable, the old locale-specific browser transcription/typed-text path is still supported.
+- The AI prompt uses the selected language and the actual `Master_Items` catalog as a construction vocabulary context. Supported choices are Tamil, Kannada, Telugu, Bengali, Marathi, Hindi, Malayalam and English.
+- The report's **Work Done** is always prepared in **English**, shown to supervisors for checking, and saved in the `Reports.work_done` field for Admin/Lead. The original transcribed speech goes into `Reports.source_transcript`, and the selected language goes into `Reports.source_language`. **No raw audio is stored.**
+- Regional number words can be mapped to numeric quantities only with an exact transcript evidence phrase and only when the engineer verifies every value. Uncertain resources are omitted rather than guessed.
+- If Gemini is unavailable, the app does not silently copy regional text into the English Work Done field. The supervisor can type the English work description and manually enter resources.
+- Manual local-script descriptions are translated on the server before submission if AI is available. If translation cannot be performed, submission is rejected until an English description is entered.
+
+## Update an existing working website
+
+1. Back up the live repository files, `src/app/environment.ts`, `backend/Code.gs`, and the Operations spreadsheet.
+2. In the **existing** Apps Script project, replace `Code.gs` with the V4.1 `backend/Code.gs`; save; run `setupProject()` once to append `source_transcript` and `source_language` columns to the existing `Reports` sheet without deleting data; then use **Deploy → Manage deployments → Edit → New version → Deploy**.
+3. Open the **existing** Cloudflare Worker `csp-sitepulse-api`, edit its code using this ZIP's `worker/index.js`, and deploy. The Worker/Apps Script JSON request size ceiling is increased only so that a short audio clip can pass through. **Keep existing Worker Secrets** unchanged.
+4. Copy the updated frontend files into the local GitHub repository and preserve your **real `src/app/environment.ts`**. Commit and push with GitHub Desktop.
+5. GitHub → Actions: verify **build** and **deploy** are green. Open the site in a private browser window to avoid caching.
+6. Test voice recording/transcription with one Kannada (or other regional) speaking supervisor, including local number words and a few items, confirm the translated English Work Done, and then check the Admin/Lead report view and the `Reports` spreadsheet.
+
+## Verification and known limits
+
+Source syntax, contract and multilingual Kannada regression tests passed. The microphone model requests, accent quality, bilingual accuracy, full browser build and live Google accounts must be tested after publishing. **No speech system guarantees correct accents or quantities; supervisors must review and verify the report before submission.** Gemini API audio processing may incur costs and sends audio to the configured Google model only after Generate report is clicked. Keep audio short, use a quiet location, and do not include private information not necessary for the report.
+
+## Files required for upgrade
+
+`backend/Code.gs`, `worker/index.js`, `src/app/app.component.ts`, `src/app/app.component.html`, `src/app/models.ts`. Existing `environment.ts`, Firestore security rules, push settings, and database IDs are unchanged.
+
+---
+
 # CSP SitePulse V4 — Firestore messaging update (November 12, 2026)
 
 This is the **complete V3 project with the V4 messaging changes**, not just a code snippet. It preserves the existing Jira, inventory/rate history, Daily Site Reports, Google Sheets workbooks, voice report flows, Cloudflare Worker, and notification service worker. The **private staff roster and all credentials are deliberately excluded**.

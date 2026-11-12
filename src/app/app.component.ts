@@ -45,6 +45,8 @@ export class AppComponent implements OnInit,OnDestroy {
   reportDraft:ReportDraft=this.freshReport();
   selectedItemId='';newItemQty=1;
   voiceTranscript='';recognizing=false;
+  recordedAudio:Blob|null=null;private mediaRecorder:MediaRecorder|null=null;
+  private mediaStream:MediaStream|null=null;private recordingTimer:ReturnType<typeof setTimeout>|null=null;
   private recognition:SpeechEngine|null=null;
   verifiedDraft=false;
   revisionFor:Report|null=null;
@@ -77,7 +79,7 @@ export class AppComponent implements OnInit,OnDestroy {
       else window.addEventListener('load',()=>{void register();},{once:true});
     }
   }
-  ngOnDestroy():void { this.recognition?.stop();if(this.liveTimer)clearInterval(this.liveTimer);void this.chat.disconnect();window.removeEventListener('focus',this.focusHandler); }
+  ngOnDestroy():void { this.stopVoice();if(this.liveTimer)clearInterval(this.liveTimer);void this.chat.disconnect();window.removeEventListener('focus',this.focusHandler); }
   private focusHandler=()=>{if(this.data)void this.refreshLive();};
   private readLang():Lang { const saved=localStorage.getItem('csp.lang');return (LANGUAGES.some(x=>x.code===saved)?saved:'en-IN') as Lang; }
   setLang(next:Lang):void {this.lang=next;localStorage.setItem('csp.lang',next);document.documentElement.lang=next.slice(0,2);}
@@ -256,24 +258,77 @@ export class AppComponent implements OnInit,OnDestroy {
   selectResource(itemId:string):void{this.selectedItemId=itemId;this.selectedRateId='';this.customRate=null;this.customRateNote='';}
   removeLine(index:number):void {this.reportDraft.lines.splice(index,1);this.verifiedDraft=false;}
   startVoice():void {
+    // Audio-first mode: send a short original recording to Gemini. This improves
+    // local accents and code-switched construction vocabulary over browser-only STT.
+    this.recordedAudio=null;this.verifiedDraft=false;
+    if(typeof MediaRecorder!=='undefined'&&!!navigator.mediaDevices){void this.captureVoiceAudio();return;}
+    this.startBrowserVoice();
+  }
+  private async captureVoiceAudio():Promise<void>{
+    try {
+      const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+      const formats=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'];
+      const mime=formats.find(f=>MediaRecorder.isTypeSupported(f));
+      if(!mime){stream.getTracks().forEach(t=>t.stop());this.startBrowserVoice();return;}
+      const rec=new MediaRecorder(stream,{mimeType:mime,audioBitsPerSecond:24000});
+      const chunks:Blob[]=[];this.mediaRecorder=rec;this.mediaStream=stream;
+      rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+      rec.onstop=()=>{
+        stream.getTracks().forEach(t=>t.stop());this.mediaStream=null;this.mediaRecorder=null;
+        if(this.recordingTimer){clearTimeout(this.recordingTimer);this.recordingTimer=null;}
+        this.recognizing=false;
+        const audio=new Blob(chunks,{type:rec.mimeType||mime});
+        if(audio.size>700000){this.recordedAudio=null;this.inform('Recording is too large. Speak for a shorter time (up to 45 seconds).','error');return;}
+        if(audio.size<100){this.recordedAudio=null;this.inform('No usable audio was recorded. Try speaking again.','error');return;}
+        this.recordedAudio=audio;
+        this.inform('Recording ready. Click Generate report to interpret your original speech in '+this.currentLanguageLabel+'.','info');
+      };
+      rec.onerror=()=>{this.recognizing=false;this.inform('Microphone recording failed. Type your update or retry.','error');};
+      rec.start(1000);this.recognizing=true;
+      this.recordingTimer=setTimeout(()=>this.stopVoice(),45000);
+    }catch(e){this.inform('Unable to access microphone. Check browser permission or type the update. '+this.errorText(e),'error');}
+  }
+  private startBrowserVoice():void {
     const ctor=(window as unknown as {SpeechRecognition?:new()=>SpeechEngine;webkitSpeechRecognition?:new()=>SpeechEngine}).SpeechRecognition ||
       (window as unknown as {webkitSpeechRecognition?:new()=>SpeechEngine}).webkitSpeechRecognition;
-    if(!ctor){this.inform('Speech recognition is unavailable in this browser. Type the transcript, or try a supported browser.','error');return;}
+    if(!ctor){this.inform('Speech recording is unsupported in this browser. Type your update in any supported language.','error');return;}
     try{const rec=new ctor();rec.lang=this.lang;rec.continuous=true;rec.interimResults=false;
       rec.onresult=e=>{let content='';for(let i=e.resultIndex;i<e.results.length;i++)if(e.results[i].isFinal)content+=e.results[i][0].transcript+' ';this.voiceTranscript=(this.voiceTranscript+' '+content).trim();};
       rec.onerror=e=>{this.recognizing=false;this.inform('Voice capture: '+e.error,'error');};
       rec.onend=()=>{this.recognizing=false;};this.recognition=rec;rec.start();this.recognizing=true;
     }catch(e){this.inform(this.errorText(e),'error');}
   }
-  stopVoice():void {this.recognition?.stop();this.recognizing=false;}
-  async analyzeVoice():Promise<void>{if(!this.voiceTranscript.trim()){this.inform('Speak or type a transcript before generating the report.','error');return;}
+  stopVoice():void {
+    if(this.recordingTimer){clearTimeout(this.recordingTimer);this.recordingTimer=null;}
+    if(this.mediaRecorder&&this.mediaRecorder.state!=='inactive')this.mediaRecorder.stop();
+    else if(this.recognition){this.recognition.stop();this.recognition=null;this.recognizing=false;}
+  }
+  discardVoice():void {this.recordedAudio=null;this.verifiedDraft=false;}
+  private async blobBase64(blob:Blob):Promise<string>{
+    const bytes=new Uint8Array(await blob.arrayBuffer());let binary='';
+    for(let i=0;i<bytes.length;i+=8192){binary+=String.fromCharCode(...bytes.subarray(i,i+8192));}
+    return btoa(binary);
+  }
+  async analyzeVoice():Promise<void>{
+    if(this.recognizing){this.inform('Stop the recording before generating the report.','error');return;}
+    if(!this.voiceTranscript.trim()&&!this.recordedAudio){this.inform('Speak or type a transcript before generating the report.','error');return;}
     if(!this.reportDraft.ticket_id){this.inform('Select your assigned Jira ticket first.','error');return;}
     this.busy=true;
-    try{const parsed=await this.api.call<{reportText:string;questions:string[];resources:Record<string,string>;work_done:string;completion_status:string;work_measure:number;work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string}>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date);
-      this.reportDraft.work_done=parsed.work_done;this.reportDraft.work_measure=parsed.work_measure;this.reportDraft.work_measure_unit=parsed.work_measure_unit;
+    try{
+      type Interpretation={reportText:string;questions:string[];resources:Record<string,string>;work_done:string;
+        source_transcript?:string;source_language?:string;completion_status:string;work_measure:number;
+        work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string};
+      const parsed=this.recordedAudio
+        ?await this.api.call<Interpretation>('interpretWorkAudio',await this.blobBase64(this.recordedAudio),this.recordedAudio.type.split(';')[0],this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date)
+        :await this.api.call<Interpretation>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date);
+      if(parsed.source_transcript) this.voiceTranscript=parsed.source_transcript;
+      this.reportDraft.work_done=parsed.work_done;
+      this.reportDraft.work_measure=parsed.work_measure;this.reportDraft.work_measure_unit=parsed.work_measure_unit;
       this.reportDraft.completion_status=parsed.completion_status;this.reportDraft.lines=parsed.lines.map(l=>({...l,rate_id:'',rate_mode:'catalog'}));
       this.reportQuestions=parsed.questions||[];this.reportResourceFields=parsed.resources||{};this.reportPreview=parsed.reportText;
-      this.verifiedDraft=false;this.inform(parsed.warning|| (this.reportQuestions.length?'Please answer the important missing questions.':'Draft generated. Check every quantity.'),'info');
+      this.recordedAudio=null;
+      this.verifiedDraft=false;
+      this.inform(parsed.warning|| (this.reportQuestions.length?'Please answer the important missing questions.':'English draft generated. Check every quantity.'),'info');
     }catch(e){this.inform(this.errorText(e),'error');}
     finally{this.busy=false;}
   }
@@ -281,13 +336,13 @@ export class AppComponent implements OnInit,OnDestroy {
     if(!this.verifiedDraft){this.inform('Verify the report and quantities before submitting.','error');return;}
     if(!this.reportDraft.ticket_id||!this.reportDraft.work_done.trim()||this.reportQuestions.length||this.reportDraft.lines.some(l=>!Number.isFinite(Number(l.quantity))||Number(l.quantity)<=0)){
       this.inform('Choose a ticket, answer any follow-up questions, and check the work description and quantities.','error');return;}
-    const draft={...this.reportDraft,daily_report_text:this.dailyReportPreview,lines:this.reportDraft.lines.map(x=>({...x,quantity:Number(x.quantity)}))};
+    const draft={...this.reportDraft,source_transcript:this.voiceTranscript,source_language:this.lang,daily_report_text:this.dailyReportPreview,lines:this.reportDraft.lines.map(x=>({...x,quantity:Number(x.quantity)}))};
     const success=await this.task(()=>this.revisionFor?this.api.call('reviseReport',this.revisionFor.id,draft):this.api.call('submitReport',draft),this.revisionFor?'Revision submitted.':'Report sent for approval.');
-    if(success){this.reportDraft=this.freshReport();this.voiceTranscript='';this.reportPreview='';this.reportQuestions=[];this.revisionFor=null;this.verifiedDraft=false;this.go('reports');}
+    if(success){this.reportDraft=this.freshReport();this.voiceTranscript='';this.recordedAudio=null;this.reportPreview='';this.reportQuestions=[];this.revisionFor=null;this.verifiedDraft=false;this.go('reports');}
   }
   editRevision(report:Report):void {
     this.revisionFor=report;this.reportDraft={ticket_id:report.ticket_id,work_date:report.work_date||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date()),work_done:report.work_done,completion_status:report.completion_status,work_measure:report.work_measure,work_measure_unit:report.work_measure_unit,lines:report.lines.map(l=>({id:l.id,item_id:l.item_id,quantity:l.quantity,rate_id:l.rate_id,rate_mode:l.rate_mode,actual_rate:l.locked_price,rate_note:l.rate_note}))};this.reportQuestions=[];this.reportResourceFields={};
-    this.translatedRevision='';this.verifiedDraft=false;this.go('reports');
+    this.voiceTranscript=report.source_transcript||'';this.recordedAudio=null;this.translatedRevision='';this.verifiedDraft=false;this.go('reports');
     window.scrollTo({top:0,behavior:'smooth'});
   }
   async translateRevision():Promise<void>{if(!this.revisionFor?.revision_note)return;
