@@ -269,7 +269,7 @@ export class AppComponent implements OnInit,OnDestroy {
   async analyzeVoice():Promise<void>{if(!this.voiceTranscript.trim()){this.inform('Speak or type a transcript before generating the report.','error');return;}
     if(!this.reportDraft.ticket_id){this.inform('Select your assigned Jira ticket first.','error');return;}
     this.busy=true;
-    try{const parsed=await this.api.call<{reportText:string;questions:string[];resources:Record<string,string>;work_done:string;completion_status:string;work_measure:number;work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string}>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id);
+    try{const parsed=await this.api.call<{reportText:string;questions:string[];resources:Record<string,string>;work_done:string;completion_status:string;work_measure:number;work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string}>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date);
       this.reportDraft.work_done=parsed.work_done;this.reportDraft.work_measure=parsed.work_measure;this.reportDraft.work_measure_unit=parsed.work_measure_unit;
       this.reportDraft.completion_status=parsed.completion_status;this.reportDraft.lines=parsed.lines.map(l=>({...l,rate_id:'',rate_mode:'catalog'}));
       this.reportQuestions=parsed.questions||[];this.reportResourceFields=parsed.resources||{};this.reportPreview=parsed.reportText;
