@@ -3,6 +3,7 @@ import {CommonModule} from '@angular/common';
 import {FormsModule} from '@angular/forms';
 import {ApiService} from './api.service';
 import {PushService} from './push.service';
+import {FirestoreChatService} from './firestore-chat.service';
 import {NAV,LANGUAGES,tr,TextKey} from './i18n';
 import type {Bootstrap, DirectMessage, LiveUpdates, JiraDetail, Lang, Notice, Report, ReportDraft, ReportLine, Resource, Role, Section, Staff, Ticket, Workbook} from './models';
 import {environment} from './environment';
@@ -28,7 +29,7 @@ export class AppComponent implements OnInit,OnDestroy {
   email='';code='';
   message=''; messageKind:'success'|'error'|'info'='info';
   search='';ticketStatus='all';supervisorFilter='all';locationFilter='all';ticketDateFilter='';resourceFilter='all';
-  ticketGroupFilter='all';jiraAssignmentGroup='all'; bellOpen=false; selectedPeerId='';newMessage=''; sendingMessage=false; private chatTimer:ReturnType<typeof setInterval>|null=null;private isChatPolling=false; private readInFlight=false;
+  ticketGroupFilter='all';jiraAssignmentGroup='all'; bellOpen=false; selectedPeerId='';newMessage=''; sendingMessage=false; private readInFlight=false;
   isLiveSyncing=false; private liveTimer:ReturnType<typeof setInterval>|null=null;
   reportPreview=''; reportQuestions:string[]=[];followUpAnswer=''; reportResourceFields:Record<string,string>={};
   selectedTicket:Ticket|null=null;
@@ -65,11 +66,10 @@ export class AppComponent implements OnInit,OnDestroy {
   labels:Partial<Record<Section,string>>={};
   private lastAutoJiraSync=0;
 
-  constructor(public readonly api:ApiService,private readonly push:PushService) {}
+  constructor(public readonly api:ApiService,private readonly push:PushService,public readonly chat:FirestoreChatService) {}
   ngOnInit():void {
     if (this.api.hasSession) void this.loadBootstrap(true);
     this.liveTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.data&&this.section!=='messages'&&!this.busy&&!this.isBooting)void this.refreshLive();},8000);
-    this.chatTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.section==='messages'&&this.data&&!this.isBooting)void this.refreshChats();},3000);
     window.addEventListener('focus',this.focusHandler);
     if ('serviceWorker' in navigator) {
       const register=()=>navigator.serviceWorker.register('firebase-messaging-sw.js',{scope:'./'}).catch(()=>{});
@@ -77,7 +77,7 @@ export class AppComponent implements OnInit,OnDestroy {
       else window.addEventListener('load',()=>{void register();},{once:true});
     }
   }
-  ngOnDestroy():void { this.recognition?.stop();if(this.liveTimer)clearInterval(this.liveTimer);if(this.chatTimer)clearInterval(this.chatTimer);window.removeEventListener('focus',this.focusHandler); }
+  ngOnDestroy():void { this.recognition?.stop();if(this.liveTimer)clearInterval(this.liveTimer);void this.chat.disconnect();window.removeEventListener('focus',this.focusHandler); }
   private focusHandler=()=>{if(this.data)void this.refreshLive();};
   private readLang():Lang { const saved=localStorage.getItem('csp.lang');return (LANGUAGES.some(x=>x.code===saved)?saved:'en-IN') as Lang; }
   setLang(next:Lang):void {this.lang=next;localStorage.setItem('csp.lang',next);document.documentElement.lang=next.slice(0,2);}
@@ -167,6 +167,7 @@ export class AppComponent implements OnInit,OnDestroy {
     finally{this.isLoginBusy=false;}
   }
   async logout():Promise<void>{
+    await this.chat.disconnect();
     try {await this.api.call('logoutSession');} catch(_){}
     this.api.clearSession();this.data=null;this.section='overview';this.loginStep='email';this.isMobileMenuOpen=false;this.bellOpen=false;this.profileDraft={};this.inform('Signed out.','info');
   }
@@ -174,30 +175,35 @@ export class AppComponent implements OnInit,OnDestroy {
     if(this.isBooting)return;this.isBooting=true;
     try {const data=await this.api.call<Bootstrap>('getBootstrap');
       if(!data.authorized){this.api.clearSession();this.data=null;throw new Error(data.message||'Your session has expired.');}
-      this.data=data;this.labels={...data.menuLabels};this.profileDraft={...data.user};
+      this.data={...data,messages:this.chat.messages};this.labels={...data.menuLabels};this.profileDraft={...data.user};
+      void this.connectFirestoreChat(data.user.id);
       if(!this.selectedPeerId&&data.contacts.length)this.selectedPeerId=data.contacts[0].id;
       if(!this.visibleNav.some(n=>n.section===this.section))this.section='overview';
       if(!initial)this.inform('Your workspace is up to date.','success');
-    }catch(e){if(initial)this.api.clearSession();this.inform(this.errorText(e),'error');}
+    }catch(e){if(initial){this.api.clearSession();void this.chat.disconnect();}this.inform(this.errorText(e),'error');}
     finally{this.isBooting=false;}
   }
   private errorText(e:unknown):string{return e instanceof Error?e.message:'The request could not be completed.';}
   async refreshLive():Promise<void>{
     if(this.isLiveSyncing||!this.api.hasSession||!this.data)return;this.isLiveSyncing=true;
     try{const fresh=await this.api.call<LiveUpdates>('getLiveUpdates');
-      if(this.data){this.data={...this.data,tickets:fresh.tickets,reports:fresh.reports,notifications:fresh.notifications,messages:fresh.messages,items:fresh.items,contacts:fresh.contacts,itemRates:fresh.itemRates};}
+      if(this.data){this.data={...this.data,tickets:fresh.tickets,reports:fresh.reports,notifications:fresh.notifications,items:fresh.items,contacts:fresh.contacts,itemRates:fresh.itemRates};}
       if(this.section==='messages')void this.markConversationRead();
     }catch(_){/* Do not display transient polling errors; explicit Refresh reports them. */}
     finally{this.isLiveSyncing=false;}
   }
+  private async connectFirestoreChat(uid:string):Promise<void>{
+    try {
+      await this.chat.connect(uid,messages=>{
+        if(!this.data||this.data.user.id!==uid)return;
+        this.data={...this.data,messages};
+        if(this.section==='messages' && this.selectedPeerId)void this.markConversationRead();
+      },error=>this.inform(error,'error'));
+    }catch(e){this.inform('Firestore messaging unavailable: '+this.errorText(e),'error');}
+  }
   async refreshChats():Promise<void>{
-    if(this.isChatPolling||!this.api.hasSession||!this.data||document.visibilityState!=='visible')return;
-    this.isChatPolling=true;
-    try {const fresh=await this.api.call<{messages:DirectMessage[]}>('getDirectMessages');
-      if(this.data){const pending=this.data.messages.filter(m=>m.id.startsWith('pending-'));this.data={...this.data,messages:[...fresh.messages,...pending]};}
-      if(this.section==='messages')void this.markConversationRead();
-    }catch(_){/* Keep last-known messages if the connection is slow. */}
-    finally{this.isChatPolling=false;}
+    // Firestore onSnapshot keeps the full conversation state up to date without polling.
+    if(this.section==='messages')await this.markConversationRead();
   }
   async task(operation:()=>Promise<unknown>,success='Updated successfully.'):Promise<boolean>{
     if(this.busy)return false;this.busy=true;
@@ -205,7 +211,7 @@ export class AppComponent implements OnInit,OnDestroy {
     catch(e){this.inform(this.errorText(e),'error');return false;}
     finally{this.busy=false;}
   }
-  private async loadBootstrapQuietly():Promise<void> {const data=await this.api.call<Bootstrap>('getBootstrap');if(!data.authorized)throw new Error(data.message||'Session expired.');this.data=data;this.labels={...data.menuLabels};if(!this.profileDraft.id)this.profileDraft={...data.user};}
+  private async loadBootstrapQuietly():Promise<void> {const data=await this.api.call<Bootstrap>('getBootstrap');if(!data.authorized)throw new Error(data.message||'Session expired.');this.data={...data,messages:this.chat.messages};this.labels={...data.menuLabels};if(!this.profileDraft.id)this.profileDraft={...data.user};}
   go(section:Section):void {
     if(!this.visibleNav.some(n=>n.section===section)){this.inform(this.t('noPermission'),'error');return;}
     this.section=section;this.isMobileMenuOpen=false;this.search='';
@@ -385,30 +391,52 @@ export class AppComponent implements OnInit,OnDestroy {
   toggleBell():void {this.bellOpen=!this.bellOpen;}
   async selectPeer(id:string):Promise<void>{this.selectedPeerId=id;await this.markConversationRead();void this.refreshChats();}
   private async markConversationRead():Promise<void>{
-    if(!this.selectedPeerId||!this.data||this.section!=='messages'||this.readInFlight)return;
+    if(!this.selectedPeerId||!this.data||this.section!=='messages'||this.readInFlight||!this.chat.connected)return;
     const peerId=this.selectedPeerId,me=this.data.user.id,stamp=new Date().toISOString();
-    const hasUnread=this.data.messages.some(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at);
-    if(!hasUnread)return;
-    // Show the correct unread count as soon as the conversation is opened.
-    const seen=new Set(this.data.messages.filter(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at).map(m=>m.id));
-    this.data={...this.data,messages:this.data.messages.map(m=>seen.has(m.id)?{...m,read_at:stamp}:m),notifications:this.data.notifications.map(n=>n.type==='direct_message'&&seen.has(n.target_id||'')?{...n,read_at:stamp}:n)};
+    const unread=this.data.messages.filter(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at&&!m.pending);
+    if(!unread.length)return;
+    // Clear the unread badge optimistically; the Firestore snapshot is the final source of truth.
+    const seen=new Set(unread.map(m=>m.id));
+    this.data={...this.data,
+      messages:this.data.messages.map(m=>seen.has(m.id)?{...m,read_at:stamp}:m),
+      notifications:this.data.notifications.map(n=>n.type==='direct_message'&&n.actor_id===peerId?{...n,read_at:stamp}:n)};
     this.readInFlight=true;
-    try{await this.api.call('markDirectMessagesRead',peerId);}
-    catch(_){await this.refreshChats();}
-    finally{this.readInFlight=false;}
+    let success=false;
+    try{await this.chat.markRead(peerId);success=true;
+      void this.api.call('markFirestoreNotificationsRead',peerId).catch(()=>{});
+    }catch(e){this.inform('Unable to mark messages as read: '+this.errorText(e),'error');}
+    finally{this.readInFlight=false;
+      if(success && this.section==='messages' && this.selectedPeerId===peerId &&
+         this.chat.messages.some(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at&&!m.pending))
+        void this.markConversationRead();
+    }
   }
   async sendMessage():Promise<void>{
     if(this.sendingMessage||!this.data||!this.selectedPeerId||!this.newMessage.trim())return;
-    const body=this.newMessage.trim(),to=this.selectedPeerId,id='pending-'+Date.now();
+    const body=this.newMessage.trim(),to=this.selectedPeerId;
+    if(!this.data.contacts.some(c=>c.id===to)){this.inform('Choose an active staff contact.','error');return;}
     this.newMessage='';this.sendingMessage=true;
-    const pending:DirectMessage={id,sender_id:this.data.user.id,recipient_id:to,body,created_at:new Date().toISOString(),read_at:'',pending:true};
-    this.data={...this.data,messages:[...this.data.messages,pending]};
-    try{const saved=await this.api.call<DirectMessage>('sendDirectMessage',to,body);
-      if(this.data)this.data={...this.data,messages:this.data.messages.map(m=>m.id===id?saved:m)};
-      void this.refreshChats();
-    }catch(e){if(this.data)this.data={...this.data,messages:this.data.messages.filter(m=>m.id!==id)};
-      this.newMessage=body;this.inform('Message not sent: '+this.errorText(e),'error');}
+    try{
+      // Local Firestore snapshots immediately display the message, before the server acknowledges it.
+      const id=await this.chat.send(to,body);
+      // Background push is best-effort and does not delay the chat UI.
+      void this.api.call('notifyFirestoreMessage',to,id).catch(e=>console.warn('Message push unavailable:',this.errorText(e)));
+    }catch(e){this.newMessage=body;this.inform('Message not sent: '+this.errorText(e),'error');}
     finally{this.sendingMessage=false;}
+  }
+  async importOldChatHistory():Promise<void>{
+    if(this.role!=='admin'||this.busy)return;
+    if(!window.confirm('Copy old Direct_Messages spreadsheet records into Firestore? Existing spreadsheet records will not be deleted.'))return;
+    this.busy=true;
+    try{
+      let next=0,total=0,imported=0,skipped=0;
+      do{
+        const result=await this.api.call<{total:number;nextOffset:number;imported:number;skipped:number}>('migrateLegacyMessagesToFirestore',next);
+        total=result.total;imported+=result.imported;skipped+=result.skipped;next=result.nextOffset;
+      }while(next<total);
+      this.inform(`Historical message import finished: ${imported} imported, ${skipped} already present or skipped.`,'success');
+    }catch(e){this.inform('Message import stopped: '+this.errorText(e),'error');}
+    finally{this.busy=false;}
   }
   async addRate():Promise<void>{
     if(!this.newRateItemId||this.newRatePrice===null||Number(this.newRatePrice)<0||!this.newRateDate){this.inform('Select an item, date and non-negative rate.','error');return;}

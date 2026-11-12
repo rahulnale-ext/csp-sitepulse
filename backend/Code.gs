@@ -423,7 +423,7 @@ function getBootstrap(sessionToken) {
         return rows_(ss,'Users').filter(function(u){return (u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true')) && (String(u.manager_id)===String(user.id) || supIds.has(String(u.id)));}).map(publicRow_);
       })() : [],
     notifications: notificationRows_(ss, user.id),
-    messages: messagesFor_(ss,user.id),
+    messages: [], // V4: realtime messages are loaded directly from Firestore.
     contacts: rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';}).map(function(u){return {id:u.id,name:u.name,role:u.role};}),
     jiraReady: role === 'admin' && jiraConfigured_(props),
     reportingWorkbookReady:!!props.getProperty('REPORTING_WORKBOOK_ID'),
@@ -1829,7 +1829,8 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'interpretWorkVoice','localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
   'getLiveUpdates','getDirectMessages','sendDirectMessage','markDirectMessagesRead','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
-  'renameReportingWorkbookColumn','importScreenshotStaffProfiles'
+  'renameReportingWorkbookColumn','importScreenshotStaffProfiles',
+  'getFirestoreChatToken','notifyFirestoreMessage','markFirestoreNotificationsRead','migrateLegacyMessagesToFirestore'
 ]);
 
 function doPost(e) {
@@ -1848,6 +1849,7 @@ function doPost(e) {
       listCivilTickets, interpretWorkVoice, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
       sendPushTest, saveMenuLabels, getLiveUpdates,getDirectMessages,sendDirectMessage,markDirectMessagesRead,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
+      getFirestoreChatToken,notifyFirestoreMessage,markFirestoreNotificationsRead,migrateLegacyMessagesToFirestore,
     };
     const handler = functions[method];
     if (CSP_PUBLIC_RPC_METHODS.indexOf(method) < 0 || typeof handler !== 'function') {
@@ -2018,9 +2020,165 @@ function getLiveUpdates(sessionToken){
   const contacts=rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';})
     .map(function(u){return {id:u.id,name:u.name,role:u.role};});
   return {tickets:scopedTickets_(ss,user),reports:reportsFor_(ss,user),notifications:notificationRows_(ss,user.id),
-    messages:messagesFor_(ss,user.id),items:items,contacts:contacts,
+    messages:[],items:items,contacts:contacts, // V4: avoid reading old Sheets chat on live updates.
     itemRates:allRates.filter(function(r){return user.role!=='supervisor'||rateDay_(r)<=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');}).map(publicRow_).reverse()};
 }
+
+/**
+ * CSP SitePulse V4: secure Firestore messenger integration.
+ * Keep FCM_SERVICE_ACCOUNT_JSON in Apps Script Script Properties only.
+ * The Firebase browser receives a short-lived *custom sign-in token*, never the private key.
+ */
+function cspChatServiceAccount_(){
+  const props=PropertiesService.getScriptProperties();
+  const raw=props.getProperty('FCM_SERVICE_ACCOUNT_JSON');
+  if(!raw)throw new Error('FCM_SERVICE_ACCOUNT_JSON is not set. Configure the private service account in Apps Script Project Settings.');
+  const account=JSON.parse(raw);
+  const project=String(props.getProperty('FCM_PROJECT_ID')||'').trim();
+  if(!account.client_email||!account.private_key||!account.project_id||!project||account.project_id!==project)
+    throw new Error('Firebase service-account configuration or project ID is inconsistent.');
+  return {account:account,project:project};
+}
+function cspChatBase64_(obj){
+  return Utilities.base64EncodeWebSafe(Utilities.newBlob(JSON.stringify(obj)).getBytes()).replace(/=+$/,'');
+}
+/** Called after an already-valid Apps Script OTP session, never from public unauthenticated login. */
+function getFirestoreChatToken(sessionToken){
+  const ss=db_();
+  const user=identity_(ss,sessionToken);
+  const settings=cspChatServiceAccount_();
+  const session=rows_(ss,'Sessions').find(function(r){return String(r.token_hash)===digest_(sessionToken);});
+  if(!session)throw new Error('Session not found. Sign in again.');
+  const uid=String(user.id||'');
+  if(!/^[A-Za-z0-9_-]{8,128}$/.test(uid))throw new Error('Staff ID is not valid for Firebase.');
+  const now=Math.floor(Date.now()/1000);
+  const expiry=new Date(session.expires_at).getTime();
+  if(!Number.isFinite(expiry)||expiry<=Date.now())throw new Error('Your SitePulse session has expired.');
+  const account=settings.account;
+  const unsigned=cspChatBase64_({alg:'RS256',typ:'JWT'})+'.'+cspChatBase64_({
+    iss:account.client_email,sub:account.client_email,
+    aud:'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+    iat:now,exp:now+3300,uid:uid,
+    claims:{csp_chat:true,csp_until_ms:expiry}
+  });
+  const signature=Utilities.base64EncodeWebSafe(Utilities.computeRsaSha256Signature(unsigned,account.private_key)).replace(/=+$/,'');
+  return {token:unsigned+'.'+signature,uid:uid,projectId:settings.project};
+}
+/** Uses same protected service account to access the Firestore REST API. */
+function cspChatFirestoreAccess_(){
+  const cache=CacheService.getScriptCache();
+  const saved=cache.get('csp-firestore-oauth-v4');
+  if(saved)return saved;
+  const account=cspChatServiceAccount_().account,now=Math.floor(Date.now()/1000);
+  const unsigned=cspChatBase64_({alg:'RS256',typ:'JWT'})+'.'+cspChatBase64_({
+    iss:account.client_email,scope:'https://www.googleapis.com/auth/datastore',
+    aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3500
+  });
+  const signature=Utilities.base64EncodeWebSafe(Utilities.computeRsaSha256Signature(unsigned,account.private_key)).replace(/=+$/,'');
+  const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/token',{
+    method:'post',contentType:'application/x-www-form-urlencoded',
+    payload:{grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion:unsigned+'.'+signature},
+    muteHttpExceptions:true
+  });
+  if(response.getResponseCode()!==200)throw new Error('Firestore OAuth authentication failed (HTTP '+response.getResponseCode()+').');
+  const data=JSON.parse(response.getContentText());
+  if(!data.access_token)throw new Error('Firestore OAuth response was empty.');
+  cache.put('csp-firestore-oauth-v4',data.access_token,Math.max(60,Math.min(3300,Number(data.expires_in||3600)-120)));
+  return data.access_token;
+}
+/**
+ * Called asynchronously after a Firestore message is saved. The server verifies the
+ * actual Firestore document before sending an FCM push, preventing forged notifications.
+ */
+function notifyFirestoreMessage(sessionToken,recipientId,messageId){
+  const ss=db_(),sender=identity_(ss,sessionToken);
+  const to=rows_(ss,'Users').find(function(u){return String(u.id)===String(recipientId)&&String(u.account_status||'active')==='active'&&u.email;});
+  if(!to||String(to.id)===String(sender.id))throw new Error('Recipient is not an active staff account.');
+  const id=String(messageId||'');
+  if(!/^[a-zA-Z0-9_-]{8,150}$/.test(id))throw new Error('Invalid Firestore message ID.');
+  const project=cspChatServiceAccount_().project;
+  const url='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(project)+'/databases/(default)/documents/sitepulseMessages/'+encodeURIComponent(id);
+  const result=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+cspChatFirestoreAccess_()},muteHttpExceptions:true});
+  if(result.getResponseCode()!==200)throw new Error('Unable to verify Firestore message (HTTP '+result.getResponseCode()+').');
+  const document=JSON.parse(result.getContentText()),fields=document.fields||{};
+  if(!fields.senderId||fields.senderId.stringValue!==String(sender.id)||
+      !fields.recipientId||fields.recipientId.stringValue!==String(to.id))
+    throw new Error('Message sender or recipient did not match the signed-in user.');
+  if(fields.readAt && fields.readAt.timestampValue)return {notified:false,alreadyRead:true};
+  return transaction_(function(tx){
+    identity_(tx,sessionToken);
+    if(rows_(tx,'Notifications').some(function(n){return n.type==='direct_message'&&String(n.target_id)===id&&String(n.recipient_id)===String(to.id);}))return {notified:true,alreadySent:true};
+    const body=String((fields.body||{}).stringValue||'').slice(0,160);
+    notify_(tx,to.id,sender.id,'direct_message','Message from '+sender.name,body,'message',id);
+    return {notified:true};
+  });
+}
+function markFirestoreNotificationsRead(sessionToken,peerId){
+  return transaction_(function(ss){
+    const me=identity_(ss,sessionToken),now=new Date().toISOString();
+    let updated=0;
+    rows_(ss,'Notifications').filter(function(n){
+      return String(n.recipient_id)===String(me.id)&&String(n.actor_id)===String(peerId)
+        && n.type==='direct_message'&&!n.read_at;
+    }).forEach(function(note){note.read_at=now;write_(ss,'Notifications',note);updated++;});
+    return {updated:updated};
+  });
+}
+function cspFirestoreValue_(value,kind){
+  if(kind==='timestamp'){
+    if(!value)return {nullValue:null};
+    const date=new Date(String(value));
+    return Number.isNaN(date.getTime())?{nullValue:null}:{timestampValue:date.toISOString()};
+  }
+  return {stringValue:String(value||'')};
+}
+/**
+ * Admin-only, rerunnable import of legacy Direct_Messages rows. Firestore create-only
+ * preconditions avoid overwriting current read receipts. Old spreadsheet rows remain untouched.
+ */
+function migrateLegacyMessagesToFirestore(sessionToken,offsetInput){
+  const ss=db_();requireRole_(ss,['admin'],sessionToken);
+  const offset=Number(offsetInput||0);
+  if(!Number.isSafeInteger(offset)||offset<0)throw new Error('Invalid import offset.');
+  const old=rows_(ss,'Direct_Messages');
+  const page=old.slice(offset,offset+40);
+  const project=cspChatServiceAccount_().project;
+  const base='projects/'+project+'/databases/(default)/documents/sitepulseMessages/';
+  const writes=[];
+  let invalid=0;
+  page.forEach(function(row){
+    const id=String(row.id||''),sender=String(row.sender_id||''),recipient=String(row.recipient_id||'');
+    if(!/^[A-Za-z0-9_-]{8,150}$/.test(id)||!/^[A-Za-z0-9_-]{8,128}$/.test(sender)||
+        !/^[A-Za-z0-9_-]{8,128}$/.test(recipient)||sender===recipient||!String(row.body||'').trim()){
+      invalid++;return;
+    }
+    const created=new Date(row.created_at);
+    if(Number.isNaN(created.getTime())){invalid++;return;}
+    writes.push({update:{name:base+id,fields:{
+      senderId:{stringValue:sender},recipientId:{stringValue:recipient},
+      participantIds:{arrayValue:{values:[{stringValue:sender},{stringValue:recipient}].sort(function(a,b){return a.stringValue.localeCompare(b.stringValue);})}},
+      body:{stringValue:String(row.body).slice(0,1500)},
+      createdAt:{timestampValue:created.toISOString()},readAt:cspFirestoreValue_(row.read_at,'timestamp')
+    }},currentDocument:{exists:false}});
+  });
+  let imported=0,skipped=invalid;
+  if(writes.length){
+    const response=UrlFetchApp.fetch('https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(project)+'/databases/(default)/documents:batchWrite',{
+      method:'post',contentType:'application/json',headers:{Authorization:'Bearer '+cspChatFirestoreAccess_()},
+      payload:JSON.stringify({writes:writes}),muteHttpExceptions:true
+    });
+    if(response.getResponseCode()!==200)throw new Error('Legacy message migration failed (HTTP '+response.getResponseCode()+').');
+    const results=JSON.parse(response.getContentText()).status||[];
+    results.forEach(function(status){
+      const code=Number(status.code||0);
+      if(code===0)imported++;
+      else if(code===6||code===9)skipped++;
+      else throw new Error('Firestore message migration was rejected: '+String(status.message||code));
+    });
+  }
+  return {total:old.length,nextOffset:Math.min(old.length,offset+40),imported:imported,skipped:skipped};
+}
+
 function messagesFor_(ss,userId){
   return rows_(ss,'Direct_Messages').filter(function(m){return String(m.sender_id)===String(userId)||String(m.recipient_id)===String(userId);})
     .sort(function(a,b){return String(b.created_at).localeCompare(String(a.created_at));}).slice(0,150).reverse().map(publicRow_);

@@ -1,129 +1,71 @@
-# CSP SitePulse V3 — source update (November 11, 2026)
+# CSP SitePulse V4 — Firestore messaging update (November 12, 2026)
 
-The installation and upgrade sequence is provided in the chat, **not as an additional installation guide**.
+This is the **complete V3 project with the V4 messaging changes**, not just a code snippet. It preserves the existing Jira, inventory/rate history, Daily Site Reports, Google Sheets workbooks, voice report flows, Cloudflare Worker, and notification service worker. The **private staff roster and all credentials are deliberately excluded**.
 
-## Changes in V3
+## What's new
 
-- Messages: unread-only badge, mark-as-read on opening a conversation, optimistic sending, and lightweight 3-second chat polling while the Messages page is visible. Actual delivery depends on the network, Apps Script, and FCM. No guaranteed sub-second delivery.
-- Rates: append-only dated price register (including future prices), vendor/source notes, actual paid price with receipt reference, multiple price batches for one resource, and immutable price snapshots in `Report_Line_Items`. Rates become effective on their stated date; future prices cannot be used for an earlier work date.
-- CIVIL Jira desk is preselected; tickets are matched to the twelve approved supervisors using Jira's actual assignment fields or native Assignee with conservative known name aliases. The Jira location is read from the real `IESM_Location` field, never from the summary. When Jira metadata is unavailable a blank field stays blank.
-- Compact sidebar with recognizable icons, title tooltips and one-line Jira table text (open ticket for full description).
-- Voice reports: available-model discovery on model HTTP 404, an explicitly labeled conservative English-number fallback, resource lines saved in Google Sheets, and manual rate selection. Review all generated quantities before approval.
+- Messages are sent to **Cloud Firestore** rather than the `Direct_Messages` spreadsheet.
+- Each signed-in user receives live `onSnapshot()` updates to only conversations where they are a participant. There is **no 3-second message polling**.
+- Message unread counts update as soon as the recipient opens the conversation and the read receipts are recorded in Firestore.
+- Existing SitePulse **email OTP sign-in remains**. After the backend verifies the user's session, Apps Script signs a short-lived Firebase **custom authentication token** with the already configured private service account. Firebase browser sign-in is restricted to **memory-only persistence** so a SitePulse OTP session must be verified again when the page reloads.
+- `firestore.rules` restricts message reads to participants, writes to the authenticated sender, read-receipt updates to the recipient, and denies all other access by default. A custom claim ties Firestore access to the SitePulse session expiry.
+- Old spreadsheet messages can be **copied, without deletion**, by an admin using **Messages → Import old messages**. The migration uses authenticated Apps Script → Firestore REST with create-only preconditions so it will not overwrite existing messages or receipts.
+- A best-effort server call verifies the stored Firestore message and sends a push notification via the existing FCM integration. The foreground chat update does not wait for push delivery.
 
-## Required backend procedure
+## Important: this code is NOT deployed
 
-Back up existing backend and spreadsheets; replace `Code.gs` in the original Apps Script project, run `setupProject`, then run `seedLegacyCspItems` (admin-triggered within the app, optional to add missing standard resources), and **edit the existing Web app deployment to New version**. Do not create a new spreadsheet or overwrite Script Properties. Run the private staff setup only if it has not yet been completed; never put staff roster or secret properties in GitHub.
+Syntax checks, existing backend behavior tests, the Firebase JWT signature test, migration-format test, and static API integration tests passed. A real Angular production build **could not be executed** because dependency installation timed out. Firestore security rules have **not been emulator-tested**. Live Firestore authentication, FCM delivery, two-device timing, and message migration require testing on your project before production.
 
-## Required frontend procedure
+## Updating an existing V3 installation
 
-Copy this project over the existing local GitHub repository (not as a nested folder). Restore your saved `src/app/environment.ts` containing your live Worker and public Firebase configuration. Commit and push to main through GitHub Desktop, then check GitHub Actions Build and Deploy. Deploy Cloudflare Worker only if its code has changed (not required by V3). This ZIP deliberately contains no private staff roster or separate upgrade instructions.
+1. **Back up** your existing GitHub project folder, Google Apps Script `Code.gs`, Google Sheets, and `src/app/environment.ts` outside your public repository.
+2. In your **existing Firebase project**, create **Cloud Firestore (Standard)** in **Production mode** if it does not yet exist, and ensure **Firebase Authentication** is initialized. Use the existing project used for push notifications; do not create another project.
+3. In Firebase Console → **Firestore Database → Rules**, open `firestore.rules` in this ZIP and **merge/publish** these rules. If your Firebase project already uses other Firestore collections, merge the `sitepulseMessages` rules into the existing policy rather than overwriting unrelated permissions. **Never set `allow read, write: if true` or leave database in test mode.**
+4. In your **existing Apps Script** project, replace `Code.gs` with `backend/Code.gs`. Keep its Script Properties. Required: `FCM_PROJECT_ID` and `FCM_SERVICE_ACCOUNT_JSON`; the private JSON's `project_id` must equal `FCM_PROJECT_ID`. Save, and use **Deploy → Manage deployments → Edit → New version → Deploy**. Reuse your existing `/exec` URL. The existing Cloudflare Worker does not require changes.
+5. In your existing local GitHub repository, copy the **contents** of this ZIP's `csp-sitepulse` folder over your existing project, including `.github`. Do not create a nested duplicate folder. Restore your real **`src/app/environment.ts`** from the backup so the Worker URL and the **public** Firebase web config remain correct. **Do not restore the old V3 `app.component.ts` or `app.component.html`.** Do not put `FCM_SERVICE_ACCOUNT_JSON` or staff contact details in the GitHub repository.
+6. Open **GitHub Desktop → Changes**; inspect changes; commit `Enable Firestore messaging V4`; **Push origin**. In GitHub → **Actions → Publish CSP SitePulse**, both **build** and **deploy** must be green.
+7. Open your existing site, e.g. `https://rahulnale-ext.github.io/csp-sitepulse/`; hard-refresh and sign in with a test user. Open **Messages**. It should show **● Live messaging** when connected. Test with a second **authorized staff account** in a separate device/browser. The message should appear automatically and the unread badge should clear when opened.
+8. **Admin only, optional:** Open **Messages → Import old messages** once to copy historic `Direct_Messages` rows into Firestore. Verify sample conversations. Leave the old Google Sheet untouched as an archive; repeating the import skips existing Firestore document IDs.
 
-## Verification limits
+These are also provided directly in the chat; there is intentionally **no separate installation-steps.md file**.
 
-Node JavaScript syntax, TypeScript syntax, API allowlist, and backend pure-function behavior tests passed. The local npm install timed out and a production Angular build was **not** completed. Live Jira, FCM, Gemini, Cloudflare and real two-device messaging require testing in your accounts. For exact Jira fields, auto-discovery uses `/rest/api/2/field`; if your organization hides field metadata, set the appropriate `JIRA_*_FIELD` script properties to exact `customfield_12345` IDs.
+## Configuration and failure checks
 
----
-
-# CSP SitePulse
-
-A compact, role-aware civil field-operations web application based on the supplied `Code.gs`, CSP requirements, and Isha logo. The application is **source code, not a hosted live service**. It cannot send real email, query Jira, use Gemini, or deliver push until the owner deploys/configures the external services.
-
-## Project contents
-
-- `src/`: standalone Angular web app, responsive dashboard, staff/ticket/report flows, workbook viewer and notifications.
-- `backend/Code.gs`: adapted original Apps Script. The updated version includes persisted admin menu labels, Marathi revision translations, and an RPC logout fix.
-- `worker/`: an origin-restricted Cloudflare Worker proxy (no backend URLs or secret credentials in the frontend).
-- `public/`: installable PWA manifest, local icons, combined PWA shell + Firebase token service worker.
-- `.github/workflows/deploy.yml`: GitHub Pages deployment pipeline.
-- `REQUIREMENTS.md`: original requirements for comparison.
-- `preview/index.html`: **static, nonfunctional** design-only page using fictional sample values (never connected to Sheets).
-
-## 1. Prepare Google Apps Script and spreadsheets
-
-1. Create a Google Apps Script project in the intended Google account, or update your existing project **after backing it up**. Replace its `Code.gs` contents with `backend/Code.gs`; do not paste the frontend into Apps Script.
-2. Set the Apps Script time zone to `Asia/Kolkata` if appropriate. From the editor, run `setupProject()` once, approve access, and inspect the log URLs. It creates an operations workbook and reporting workbook automatically. Existing workbook IDs are reused rather than deleted.
-3. Run `authorizeMailService()` once, and optionally `installSessionCleanup()` and `installDailyReportReminder()`.
-4. Check the `Users` sheet. Your owner account is created as admin on first setup. Staff may sign in **only when their exact email is registered**, with supervisors assigned to a lead. Admins can manage personnel from the web UI after deployment.
-5. Deploy as Web App: **Execute as me** (the owner) and choose a publicly invocable endpoint (`Anyone`, subject to your organization's policy) because browsers reach it through the Worker. The Apps Script itself enforces server-side session authentication and roles. Copy the `/exec` endpoint for the Worker.
-6. When changing `Code.gs` later, deploy a **new web-app version**. Keep all credentials in Apps Script project properties, never in the repo.
-
-### Optional backend Script Properties
-
-| Property | Purpose |
+| Symptom | Check |
 |---|---|
-| `SPREADSHEET_ID`, `REPORTING_WORKBOOK_ID` | Created by setup; no manual upload needed |
-| `JIRA_BASE_URL` | HTTPS Jira root, e.g. your Jira host |
-| `JIRA_API_TOKEN` | Jira token, private |
-| `JIRA_AUTH_MODE`, `JIRA_EMAIL` | `bearer` (default), or basic + email if supported |
-| `JIRA_*_FIELD`, `JIRA_EXTRA_JQL` | Optional custom fields and civil filter as noted in `Code.gs` |
-| `GEMINI_API_KEY` | Gemini interpretation/translation server key, private |
-| `GEMINI_MODEL` | Optional, defaults to `gemini-2.5-flash` in supplied backend |
-| `FCM_PROJECT_ID` | Firebase project ID |
-| `FCM_SERVICE_ACCOUNT_JSON` | Complete Firebase messaging service-account JSON, private |
-| `PUSH_APP_URL` | Published GitHub Pages application URL |
-| `SITE_TIMEZONE` | Optional, e.g. `Asia/Kolkata` |
+| Website still says "Server address not configured" | Restore your working `src/app/environment.ts`, especially the Cloudflare `apiUrl`; push a new GitHub build |
+| "Firestore messaging unavailable" | Firebase config is present in `environment.ts`; `FCM_PROJECT_ID` equals the Firebase `projectId`; `FCM_SERVICE_ACCOUNT_JSON` contains the correct private service account; redeploy Apps Script after updating its code |
+| Firestore `permission-denied` | Confirm `firestore.rules` were published to the **same project and default database**; SitePulse OTP login completed successfully; Firebase Authentication initialized; Firestore access custom claim has not expired |
+| Firebase `auth/invalid-custom-token` | Check that Firebase `projectId`, service-account `project_id`, and `FCM_PROJECT_ID` match and the private key JSON is valid |
+| Message visible but push is delayed/missing | Firestore live messages are independent of push. Check FCM token registration and Apps Script Executions; the server verifies a Firestore document using Google service-account OAuth before sending push |
+| Migration HTTP 403 | The service account must have permission to access Firestore (e.g. suitable Firestore/Datastore IAM role); ask your Firebase/Google Cloud administrator |
+| GitHub build error | GitHub Actions → latest failed Build → first red error; do not keep changing unrelated files |
+| Old conversation absent | Admin should run **Import old messages**. The V3 messages remain untouched in `Direct_Messages` until manually migrated |
 
-**Do not** add Jira tokens, Gemini keys, service account JSON, or the secret Worker upstream endpoint to client-side configuration.
+**Security notes:** Firestore checks the authenticated Firebase UID and the `participantIds` of each message. Recipient IDs come from SitePulse's active contacts list in the UI; rules do not independently verify that the recipient is active. Only message reads and the UI stop immediately on sign-out; Firebase sessions are bound to the SitePulse session's expiry, but **administrator revocation of already signed-in users is not instantaneous**. Keep private service account credentials in Apps Script only, and consider short-lived revocation/active-directory checks before high-sensitivity production use.
 
-## 2. Deploy the Cloudflare Worker
+**Cost/performance:** The implementation loads all messages belonging to the current user using a real-time Firestore query. It is appropriate as a starter for a modest staff group, but read usage rises as history grows and users reconnect. For large histories, add indexed pagination and per-conversation listeners before scaling. Firestore onSnapshot does not guarantee a particular arrival time on slow or offline networks. FCM background delivery is best-effort and still depends on browser/device permission.
 
-1. Install Wrangler locally (`npm install -g wrangler`) or use Cloudflare's dashboard editor.
-2. In `worker/`, deploy `index.js` with its `wrangler.toml`: `npx wrangler deploy`.
-3. Configure two Worker secrets: `APPS_SCRIPT_URL` = full deployed Apps Script `/exec` URL; `ALLOWED_ORIGIN` = exact web origin, such as `https://YOUR-USERNAME.github.io` **without a trailing slash or repo path**. Use `npx wrangler secret put APPS_SCRIPT_URL` and `npx wrangler secret put ALLOWED_ORIGIN`.
-4. Validate a browser request from the allowed GitHub Pages origin. The Worker rejects other `Origin` headers and forwards JSON POST to Apps Script without caching.
+## New files and changed files
 
-The Worker is a transport/gateway layer, **not** a substitute for Apps Script's session and role checks. A forged Origin header alone is not a credential.
+- **New:** `src/app/firestore-chat.service.ts` — Firebase custom-token sign-in, realtime listener, send/read operations and cleanup.
+- **New:** `firestore.rules` — participant-only security policy.
+- **Updated:** `backend/Code.gs` — signed custom token, verified push, admin migration of legacy messages, notification-read sync; old Sheet messaging remains only for historical compatibility.
+- **Updated:** `src/app/app.component.ts` and `.html` — wire existing Messages UI to Firestore, remove chat polling, add optional admin import button.
+- **Updated:** `src/app/models.ts` — notification sender typing.
+- **Updated:** `tests/update-contract.mjs`, `tests/v4-messaging.mjs` — V4 contract and token/migration tests.
+- **Unchanged:** Cloudflare Worker, Github Pages workflow, logo, report/rate/Jira implementation, service worker, the public configuration placeholders.
 
-## 3. Configure the frontend and publish
+### Developer checks
 
-1. Install Node.js 22 or a compatible supported version.
-2. Run `npm install` in the project root, then `npm start` for local preview.
-3. Update `src/app/environment.ts`:
-   - `apiUrl`: your Worker HTTPS endpoint, ending in `/`.
-   - `firebase`: the **public web-app** Firebase config from the Firebase console (the public Firebase API key is **not** the service account JSON).
-   - `vapidPublicKey`: Firebase web push public VAPID key.
-4. In Firebase console, enable Cloud Messaging API and add your GitHub Pages origin to any required allowed/auth domains. Configure project messaging credentials for the Apps Script backend.
-5. Push this project (excluding secrets) to GitHub repository `main`, and enable GitHub Pages with **GitHub Actions** as the publishing source. The workflow builds with `/${repositoryName}/` as Angular base href for a standard project-pages repo.
-6. Open your Pages URL on HTTPS, sign in using your registered email and the eight-digit code, and allow notifications only when you choose.
-
-For a special `username.github.io` repository hosted at the root, change the GitHub workflow's build `--base-href` argument to `/`.
-
-### API request contract
-
-```json
-{"method":"getBootstrap","args":[],"sessionToken":"<session token from verifyLoginCode>"}
+```bash
+npm install
+npm run check
+npm run build
+node tests/contract.mjs
+node tests/update-contract.mjs
+node tests/v3-behavior.mjs
+node tests/v4-messaging.mjs
 ```
 
-The Worker forwards this shape to Apps Script and returns `{ "ok": true, "result": ... }` or `{ "ok": false, "error": ... }`. The session token is kept in **browser session storage** (not a publicly readable URL). Server-side sessions expire according to the provided backend.
-
-## 4. What works when configured
-
-- Admin: automatic/manual CIVIL issue sync, assignment to supervisors, Jira details (all mapped fields, issue links, comments and budget notes), staff accounts, resource catalogue, admin menu labels, reporting workbook access.
-- Lead: their scoped tickets and reports, review quantity edits, approve, or request revisions in their own language.
-- Supervisor: their assigned tickets, voice transcript capture (browser-dependent), Gemini extraction where enabled, manual corrections, explicit verification checkbox, report submission, translation of revision notes, and resubmission.
-- All users: compact responsive navigation, language picker (English + Tamil/Kannada/Telugu/Bengali/Marathi/Hindi/Malayalam), notifications, dashboard and email-code login.
-- PWA: installability, minimal offline shell fallback, web push opt-in, foreground and background notification handling through the app service worker.
-
-## 5. Known boundaries (do not claim these were tested live)
-
-- **Email+password is not present in the supplied backend**, which uses passwordless, 8-digit email OTP. This project preserves that established server-validated flow. A true **password plus OTP** requirement would need a separately designed and security-reviewed server credential flow (or a managed authentication provider) that the backend verifies. A password box in the UI alone would not be secure.
-- UI vocabulary has draft translations for seven Indian languages, but not every help/error/backend message is fully localized. **Native-speaker review of construction terminology and translation meaning is still required.** Gemini translations should always be verified before action.
-- Voice recognition depends on browser support and microphone permission. Typed transcription/manual reporting remains available.
-- Apps Script already provides best-effort FCM and notifications; live foreground/background delivery must be validated against the actual Firebase project, VAPID key and deployed site on each target browser/device.
-- Not all backend administration endpoints are surfaced as screens (e.g., directory columns, advanced lead-time rules, bulk legacy tools); the key workflow screens are implemented.
-- The GitHub Pages subpath must match base href and service worker scope. GitHub Pages requires public HTTPS access; no purchased domain is needed.
-- Live API/browser integration, cross-browser QA, performance and accessibility audits cannot be claimed without credentials or a deployment. `npm install` was not possible in the artifact authoring environment, so the Angular compiler/build was not executed here. Run the tests/compile in your connected development or CI environment before production rollout.
-
-## 6. Suggested acceptance checks
-
-Test with **separate accounts** for admin, lead and supervisor; check an invalid/expired OTP and logout; test role isolation on requests; run one manual and one selection-triggered CIVIL sync; verify Jira detail fields; submit and revise a report in all seven spoken languages; compare each AI-generated quantity with the transcript; exercise push foreground/background/notification-click on Chrome, Edge, Safari and Android browsers where supported; test 320/375/768/1440px widths; verify workbook formula preservation and that secrets never appear in bundled JS.
-
-## November 2026 update (v2): Start here
-
-For an **existing CSP SitePulse installation**, follow **`UPGRADE_STEPS.md`**, not the first-time installation steps above.
-
-New screens and behavior: Jira-style table with the source column labels and ticket facets, supervisor/location/created-date filters, source-supervisor assignment matching during Jira sync, notification bell dropdown (no floating in-app toast and no dedicated notifications menu), 12-second active-tab scoped refresh, push refresh, one-to-one messaging, multilingual voice-derived Daily Site Report preview and limited follow-up questions, no fabricated quantities, partial-completion preservation, profile editing with verified email changes, category-wise old/new rate history, workbook heading renaming, and pending-review staff import.
-
-The supplied staff screenshots contain **private emails and phone numbers**. To avoid putting these in a potentially **public GitHub repository**, the personal roster is **not embedded in `backend/Code.gs` or this ZIP**. Instead, use the separately supplied private file `CSP-PRIVATE-STAFF-SETUP.gs` **only within your private Google Apps Script project**. Run `seedPrivateCspStaff()` after `setupProject()` and check `CSP_Staff_Profiles`. Then use **Team → Import provided staff**. New accounts are inactive/pending until reviewed by an administrator; supervisor reporting leads are not guessed.
-
-**Limits and required verification:** Jira-specific custom-field IDs cannot be derived from screenshots; set the correct `JIRA_*_FIELD` Script Properties and sync Jira. Firebase push is best-effort, and external Jira changes are not instantly pushed into the app without Jira sync/webhook integration. The new screens have passed static JavaScript/TypeScript/contract checks but **not** a production Angular build, actual browser/device testing, or live Jira/Gemini/FCM tests (the dependency install was unavailable here). Use test records and verify before rollout.
+The GitHub Actions workflow automatically runs the Angular production build after each push; it does **not** deploy the Firestore Security Rules. Those must be published separately in Firebase Console.

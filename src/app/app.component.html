@@ -208,7 +208,7 @@
 
         <!-- Quick one-to-one messages -->
         <section *ngIf="section==='messages'" class="fade-in">
-          <div class="panel-head messages-heading"><div><p class="eyebrow">DIRECT CONVERSATIONS</p><h3>Quick messages</h3></div><small>Each message notifies the other person.</small></div>
+          <div class="panel-head messages-heading"><div><p class="eyebrow">DIRECT CONVERSATIONS</p><h3>Quick messages</h3></div><div class="button-row"><small>{{chat.connected ? "● Live messaging" : "Connecting to secure messaging…"}}</small><button *ngIf="role==='admin'" class="btn ghost small" type="button" [disabled]="busy||!chat.connected" (click)="importOldChatHistory()">Import old messages</button></div></div>
           <div class="messages-layout panel">
             <aside class="contact-pane" aria-label="Contacts">
               <button type="button" *ngFor="let person of data.contacts" class="contact-item" [class.active]="selectedPeerId===person.id" (click)="selectPeer(person.id)">

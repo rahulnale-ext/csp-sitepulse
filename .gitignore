@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.angular/
+.env
+.env.*
+**/*service-account*.json
+**/*private-key*.json
+CSP-PRIVATE-STAFF-SETUP.gs
+**/PrivateStaff.gs
+*.local
+.DS_Store
