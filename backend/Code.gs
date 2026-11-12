@@ -8,9 +8,9 @@
 const TABLES = Object.freeze({
   Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id', 'mobile_number', 'birth_date', 'photo_data', 'account_status'],
   Master_Items: ['id', 'type', 'name', 'current_price', 'quantity', 'rate_unit'],
-  Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee'],
-  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text'],
-  Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit'],
+  Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee', 'jira_assignment_group'],
+  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date'],
+  Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit', 'rate_id', 'rate_date', 'rate_source', 'rate_note'],
   Notifications: ['id', 'recipient_id', 'actor_id', 'type', 'title', 'body', 'target_kind', 'target_id', 'created_at', 'read_at'],
   Push_Subscriptions: ['id', 'user_id', 'token', 'device_label', 'created_at', 'updated_at'],
   Sessions: ['token_hash', 'user_id', 'email', 'created_at', 'expires_at'],
@@ -18,7 +18,7 @@ const TABLES = Object.freeze({
   Audit_Log: ['id', 'actor_id', 'action', 'target_id', 'created_at', 'before_json', 'after_json'],
   App_Settings: ['key', 'value', 'updated_at', 'updated_by'],
   Direct_Messages: ['id','sender_id','recipient_id','body','created_at','read_at'],
-  Item_Rates: ['id','item_id','category','old_rate','new_rate','rate_unit','changed_at','changed_by'],
+  Item_Rates: ['id','item_id','category','old_rate','new_rate','rate_unit','changed_at','changed_by','effective_date','source','note'],
   CSP_Staff_Profiles: ['role','name','email','mobile_number','manager_name','review_status','source']
 });
 const ITEM_TYPES = ['material', 'machine', 'labour', 'other'];
@@ -405,14 +405,15 @@ function getBootstrap(sessionToken) {
   try { user = identity_(ss, sessionToken); }
   catch (error) { return {authorized: false, message: error.message}; }
   const role = String(user.role);
-  const allItems = rows_(ss, 'Master_Items').map(publicRow_);
+  const allRates=itemRates_(ss);
+  const allItems = effectivePrices_(rows_(ss, 'Master_Items').map(publicRow_),allRates);
   const props = PropertiesService.getScriptProperties();
   const old = jiraLegacyConfig_(props);
   const jiraHost = String(props.getProperty('JIRA_BASE_URL') || old.jiraBaseUrl || 'https://servicedesk.isha.in').trim().replace(/\/+$/, '');
   return {
     authorized: true, user: publicRow_(user),
     items: role === 'supervisor' ? allItems.map(function(i) { return {id:i.id, type:i.type, name:i.name, rate_unit:i.rate_unit||'unit'}; }) : allItems,
-    itemRates: role==='supervisor'?[]:rows_(ss,'Item_Rates').map(publicRow_).slice(-750).reverse(),
+    itemRates: allRates.filter(function(r){return role!=='supervisor'||rateDay_(r)<=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');}).map(publicRow_).reverse(),
     tickets: scopedTickets_(ss, user), reports: reportsFor_(ss, user),
     leadRules: role==='admin' ? rows_(ss,'Lead_Rules').map(publicRow_) : [],
     users: role === 'admin' ? rows_(ss, 'Users').map(publicRow_) :
@@ -453,7 +454,7 @@ function reportsFor_(ss, user) {
     const id = String(line.report_id);
     if (!reportIds.has(id)) return;
     const item = items[String(line.item_id)];
-    const detail = {id: line.id, item_id: line.item_id, item_name: item ? item.name : 'Archived item',
+    const detail = {id: line.id, item_id: line.item_id, rate_id:line.rate_id||'',rate_date:line.rate_date||'',rate_source:line.rate_source||'',rate_note:line.rate_note||'', item_name: item ? item.name : 'Archived item',
       type: item ? item.type : 'other', quantity: Number(line.quantity), rate_unit:line.rate_unit || (item && item.rate_unit) || 'unit'};
     if (priced) {detail.locked_price = Number(line.locked_price); detail.line_total = money_(detail.quantity * detail.locked_price);}
     (byReport[id] = byReport[id] || []).push(detail);
@@ -463,7 +464,7 @@ function reportsFor_(ss, user) {
     const supervisor = people[String(r.supervisor_id)] || {};
     const view = {id:r.id, ticket_id:r.ticket_id, supervisor_id:r.supervisor_id,
       ticket_no:ticket.jira_ticket_no || 'Unknown ticket', location:ticket.location || '',
-      supervisor_name:supervisor.name || 'Unknown user', date:r.date,
+      supervisor_name:supervisor.name || 'Unknown user', date:r.date,work_date:r.work_date||String(r.date).slice(0,10),
       work_done:r.work_done,daily_report_text:r.daily_report_text||'', completion_status:r.completion_status, status:r.status,
       revision_note:r.revision_note || '', revision_count:Number(r.revision_count || 0),
       work_measure:Number(r.work_measure||0),work_measure_unit:r.work_measure_unit||'',
@@ -500,12 +501,43 @@ function saveMasterItem(sessionToken, payload) {
     write_(ss, 'Master_Items', saved);
     if (!existing || Number(existing.current_price)!==price) {
       const actor=identity_(ss,sessionToken);
-      write_(ss,'Item_Rates',{id:newId_(),item_id:saved.id,category:type,old_rate:existing?Number(existing.current_price):'',new_rate:price,rate_unit:rateUnit,changed_at:new Date().toISOString(),changed_by:actor.id});
+      write_(ss,'Item_Rates',{id:newId_(),item_id:saved.id,category:type,old_rate:existing?Number(existing.current_price):'',new_rate:price,rate_unit:rateUnit,changed_at:new Date().toISOString(),changed_by:actor.id,effective_date:Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd'),source:'Catalog update',note:''});
     }
     return publicRow_(saved);
   });
 }
 
+/** Rates are append-only. Future prices are planned; historical rates remain selectable for work dated after their effective date. */
+function siteDate_(input,label,required){
+  const val=String(input||'').trim();if(!val&&!required)return '';
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(val)||Number.isNaN(Date.parse(val+'T00:00:00Z'))||new Date(val+'T00:00:00Z').toISOString().slice(0,10)!==val)throw new Error((label||'Date')+' must be YYYY-MM-DD.');
+  return val;
+}
+function itemRates_(ss){return rows_(ss,'Item_Rates');}
+function rateDay_(r){return String(r.effective_date||r.changed_at||'').slice(0,10);}
+function approvedRateOn_(rates,itemId,day){
+  return rates.filter(function(r){return String(r.item_id)===String(itemId)&&rateDay_(r)<=day;})
+    .sort(function(a,b){return rateDay_(b).localeCompare(rateDay_(a))||String(b.changed_at).localeCompare(String(a.changed_at));})[0]||null;
+}
+function effectivePrices_(items,rates){
+  const today=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');
+  return items.map(function(item){const current=approvedRateOn_(rates,item.id,today);
+    return Object.assign({},item,{current_price:current?Number(current.new_rate):Number(item.current_price)});
+  });
+}
+function addItemRate(sessionToken,itemId,amount,date,source,note){
+  return transaction_(function(ss){
+    const actor=requireRole_(ss,['admin','lead'],sessionToken);
+    const item=rows_(ss,'Master_Items').find(function(i){return String(i.id)===String(itemId);});
+    if(!item)throw new Error('Choose a valid item.');
+    const price=number_(amount,'Rate',true),day=siteDate_(date,'Effective date',true);
+    const origin=text_(source||'Market','Source/vendor',80,true),details=text_(note||'','Rate note',250,false);
+    const existing=itemRates_(ss),earlier=approvedRateOn_(existing,item.id,day);
+    const r={id:newId_(),item_id:item.id,category:item.type,old_rate:earlier?Number(earlier.new_rate):Number(item.current_price),new_rate:price,
+      rate_unit:item.rate_unit||'unit',changed_at:new Date().toISOString(),changed_by:actor.id,effective_date:day,source:origin,note:details};
+    write_(ss,'Item_Rates',r);return publicRow_(r);
+  });
+}
 function deleteMasterItem(sessionToken, itemId) {
   return transaction_(function(ss) {
     requireRole_(ss, ['admin'], sessionToken);
@@ -657,18 +689,36 @@ function returnTicket(sessionToken, ticketId, reasonInput) {
 function reportLinePayload_(ss, payload, prior) {
   if (!Array.isArray(payload.lines) || payload.lines.length>200) throw new Error('Invalid line items.');
   const masters=Object.fromEntries(rows_(ss,'Master_Items').map(function(i){return [String(i.id),i];}));
-  const old=Object.fromEntries((prior||[]).map(function(l){return [String(l.item_id),l];}));
-  const seen=new Set();
-  const lines=payload.lines.map(function(l) {
-    const key=String(l.item_id || '');
-    if (!masters[key] || seen.has(key)) throw new Error('Unknown or duplicate item.');
-    seen.add(key);
-    return {item_id:key, quantity:number_(l.quantity,'Quantity',false),
-      locked_price:old[key] ? Number(old[key].locked_price) : number_(masters[key].current_price,'Master price',true),
-      rate_unit:old[key] ? String(old[key].rate_unit||masters[key].rate_unit||'unit') : String(masters[key].rate_unit||'unit')};
+  const old=Object.fromEntries((prior||[]).map(function(l){return [String(l.id),l];}));
+  const rates=itemRates_(ss),today=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');
+  const workDate=siteDate_(payload.work_date||today,'Work date',true);
+  if(workDate>today)throw new Error('A daily work report cannot be dated in the future.');
+  const seenOld=new Set();
+  return payload.lines.map(function(l){
+    const key=String(l.item_id||''),existing=old[String(l.id||'')];
+    if(!masters[key])throw new Error('Unknown item in report.');
+    if(existing&&String(existing.item_id)!==key)throw new Error('Revision cannot change the original resource.');
+    if(existing&&seenOld.has(existing.id))throw new Error('Duplicate report line.');
+    if(existing)seenOld.add(existing.id);
+    const quantity=number_(l.quantity,'Quantity',false);
+    const base={id:existing?existing.id:'',item_id:key,quantity:quantity};
+    // Approved reports and revisions retain the exact transaction price originally used.
+    if(existing)return Object.assign(base,{locked_price:Number(existing.locked_price),rate_unit:String(existing.rate_unit||masters[key].rate_unit||'unit'),
+      rate_id:String(existing.rate_id||''),rate_date:String(existing.rate_date||''),rate_source:String(existing.rate_source||''),rate_note:String(existing.rate_note||'')});
+    if(l.rate_mode==='actual'){
+      const actual=number_(l.actual_rate,'Actual paid rate',true);
+      const note=text_(l.rate_note,'Receipt or vendor reference',250,true);
+      return Object.assign(base,{locked_price:actual,rate_unit:String(masters[key].rate_unit||'unit'),rate_id:'',rate_date:workDate,rate_source:'Actual purchase',rate_note:note});
+    }
+    let r=null;
+    if(l.rate_id){r=rates.find(function(x){return String(x.id)===String(l.rate_id)&&String(x.item_id)===key;});
+      if(!r)throw new Error('The selected rate is not available for this item.');
+      if(rateDay_(r)>workDate)throw new Error('Future-dated rates cannot be used for an earlier work date.');
+    }else r=approvedRateOn_(rates,key,workDate);
+    return Object.assign(base,{locked_price:r?Number(r.new_rate):number_(masters[key].current_price,'Catalog price',true),
+      rate_unit:String(r&&r.rate_unit||masters[key].rate_unit||'unit'),rate_id:r?String(r.id):'',rate_date:r?rateDay_(r):workDate,
+      rate_source:r?String(r.source||'Catalog'):'Legacy catalog',rate_note:r?String(r.note||''):''});
   });
-  // Reports can truthfully record no materials, equipment or labour as Not Used.
-  return lines;
 }
 function dailyReportText_(payload,ticket,sup){
   const text=text_(payload.daily_report_text||'', 'Daily site report', 11000, true);
@@ -700,14 +750,14 @@ function submitReport(sessionToken,payload) {
     const lines=reportLinePayload_(ss,payload,[]);
     const reviewer=effectiveLeadId_(ss,sup,ticket,new Date());
     if(!reviewer||String(reviewer)===String(sup.id)||!rows_(ss,'Users').some(function(u){return u.role==='lead'&&String(u.id)===String(reviewer);}))throw new Error('Choose a separate reviewing lead for this ticket before submitting a report.');
-    const report={id:newId_(),ticket_id:ticket.id,supervisor_id:sup.id,date:new Date().toISOString(),
+    const report={id:newId_(),ticket_id:ticket.id,supervisor_id:sup.id,date:new Date().toISOString(),work_date:siteDate_(payload.work_date||Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd'),'Work date',true),
       approver_id:reviewer,work_measure:number_(payload.work_measure||0,'Work quantity',true),work_measure_unit:text_(payload.work_measure_unit||'','Work unit',32,false),
       work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),completion_status:completion,
       amount_of_work:money_(lines.reduce(function(total,l){return total+l.quantity*l.locked_price;},0)),
       status:'pending',revision_note:'',revision_count:0};
     write_(ss,'Reports',report);
     const lineSheet=ss.getSheetByName('Report_Line_Items');
-    const insert=lines.map(function(l){return [newId_(),report.id,l.item_id,l.quantity,l.locked_price,l.rate_unit];});
+    const insert=lines.map(function(l){return TABLES.Report_Line_Items.map(function(k){return k==='id'?newId_():k==='report_id'?report.id:l[k]||'';});});
     if (insert.length) lineSheet.getRange(lineSheet.getLastRow()+1,1,insert.length,TABLES.Report_Line_Items.length).setValues(insert);
     ticket.assignment_status='in_progress'; write_(ss,'Tickets',ticket);
     notify_(ss,report.approver_id,sup.id,'report_submitted','Report awaiting review',sup.name+' submitted a report for '+ticket.jira_ticket_no,'report',report.id);
@@ -745,18 +795,15 @@ function reviseReport(sessionToken,reportId,payload) {
     report.completion_status=completion;
     report.work_measure=number_(payload.work_measure||0,'Work quantity',true);report.work_measure_unit=text_(payload.work_measure_unit||'','Work unit',32,false);
     report.amount_of_work=money_(lines.reduce(function(sum,l){return sum+l.quantity*l.locked_price;},0));
-    report.status='pending';report.revision_note='';report.date=new Date().toISOString();
+    report.status='pending';report.revision_note='';report.date=new Date().toISOString();report.work_date=siteDate_(payload.work_date||report.work_date||Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd'),'Work date',true);
     write_(ss,'Reports',report);
-    const old=Object.fromEntries(prior.map(function(l){return [String(l.item_id),l];}));
-    const incoming=new Set(lines.map(function(l){return String(l.item_id);}));
-    // Delete unused rows in descending order, preserving other report rows.
-    prior.filter(function(l){return !incoming.has(String(l.item_id));}).sort(function(a,b){return b._row-a._row;})
+    const keep=new Set(lines.filter(function(l){return l.id;}).map(function(l){return String(l.id);}));
+    prior.filter(function(l){return !keep.has(String(l.id));}).sort(function(a,b){return b._row-a._row;})
       .forEach(function(l){ss.getSheetByName('Report_Line_Items').deleteRow(l._row);});
     const fresh=rows_(ss,'Report_Line_Items').filter(function(l){return String(l.report_id)===String(report.id);});
-    const byItem=Object.fromEntries(fresh.map(function(l){return [String(l.item_id),l];}));
-    lines.forEach(function(l) {
-      const existing=byItem[String(l.item_id)];
-      write_(ss,'Report_Line_Items',Object.assign({},l,{id:existing?existing.id:newId_(),report_id:report.id,_row:existing?existing._row:undefined}));
+    const byId=Object.fromEntries(fresh.map(function(l){return [String(l.id),l];}));
+    lines.forEach(function(l){const old=byId[String(l.id)];
+      write_(ss,'Report_Line_Items',Object.assign({},l,{id:old?old.id:newId_(),report_id:report.id,_row:old?old._row:undefined}));
     });
     notify_(ss,report.approver_id||sup.manager_id,sup.id,'report_resubmitted','Revised report submitted',sup.name+' revised a report for review.','report',report.id);
     return {ok:true};
@@ -996,29 +1043,59 @@ function jiraAssigneeFields_(settings) {
   return ['JIRA_ASSIGNEE_MAINTENANCE_FIELD','JIRA_ASSIGNEE_NEW_WORKS_FIELD','JIRA_ASSIGNEE_NEW_PROJECTS_FIELD']
     .map(function(n){return String(p.getProperty(n)||'').trim();}).filter(function(x){return /^customfield_\d+$/.test(x);});
 }
+function jiraFieldMetadata_(settings){
+  if(settings.fieldMeta)return settings.fieldMeta;
+  settings.fieldMeta=jiraRequest_(settings,'/rest/api/2/field');
+  return settings.fieldMeta;
+}
 function jiraResolveAssigneeFields_(settings) {
   const ids=jiraAssigneeFields_(settings);
-  if(ids.length===3){settings.assigneeFields=ids;return;}
+  if(ids.length===3){settings.assigneeFields=ids;settings.assigneeGroups=Object.fromEntries(ids.map(function(id,i){return [id,['maintenance','new_works','new_projects'][i]];}));return;}
   // Look up EXACT Jira labels. Do not accept the generic issue assignee instead.
   const wanted=['Assignee_Maintenance','Assignee_New Works','Assignee_New Projects'];
   const normalize=function(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
   let fieldList=[];
-  try{fieldList=jiraRequest_(settings,'/rest/api/2/field');}catch(error){
+  try{fieldList=jiraFieldMetadata_(settings);}catch(error){
     // Lack of Jira custom-field metadata must not prevent manual ticket synchronization.
     // Existing manually assigned supervisors remain attached to their tickets.
     settings.assigneeFields=ids;
-    settings.assigneeMappingWarning='Custom supervisor fields could not be detected. Assign supervisors manually.';
+    settings.assigneeMappingWarning='Custom supervisor fields are unavailable. The standard Jira Assignee will be used where its name matches the approved roster.';
     return;
   }
-  settings.assigneeFields=Array.from(new Set(wanted.map(function(label){
+  settings.assigneeGroups={};
+  settings.assigneeFields=Array.from(new Set(wanted.map(function(label,index){
     const found=(fieldList||[]).find(function(f){return normalize(f.name)===normalize(label);});
-    return found&&/^customfield_\d+$/.test(String(found.id))?String(found.id):'';
+    if(found&&/^customfield_\d+$/.test(String(found.id))){settings.assigneeGroups[String(found.id)]=['maintenance','new_works','new_projects'][index];return String(found.id);}return '';
   }).concat(ids).filter(Boolean)));
-  if(!settings.assigneeFields.length)settings.assigneeMappingWarning='Jira supervisor mapping fields were not found. Tickets sync, but supervisors must be assigned manually.';
+  if(!settings.assigneeFields.length)settings.assigneeMappingWarning='Custom supervisor fields were not found. Using the standard Jira Assignee when it matches one of the 12 approved supervisors.';
+}
+function jiraResolveLocationField_(settings){
+  // IESM_Location is a *specific field* in the CIVIL desk, not the ticket summary.
+  if(settings.custom[0])return;
+  const norm=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
+  const explicit=String(settings.props.getProperty('JIRA_LOCATION_FIELD')||'').trim();
+  if(explicit){if(!/^customfield_\d+$/.test(explicit))throw new Error('Invalid JIRA_LOCATION_FIELD.');settings.custom[0]=explicit;return;}
+  try{const fields=jiraFieldMetadata_(settings);
+    const matches=(fields||[]).filter(function(f){return norm(f.name)==='iesmlocation' && /^customfield_\d+$/.test(String(f.id||''));});
+    if(matches.length===1){settings.custom[0]=matches[0].id;return;}
+  }catch(e){/* Use visible placeholder rather than making up a location. */}
+  settings.locationWarning='IESM_Location Jira field was not detected. Set JIRA_LOCATION_FIELD to the exact customfield ID; empty locations will be shown as —.';
+}
+function jiraResolveDisplayFields_(settings){
+  const options=[['contact','JIRA_CONTACT_FIELD','Contact Number'],['request','JIRA_REQUEST_TYPE_FIELD','Request Type'],
+    ['subRequest','JIRA_SUB_REQUEST_FIELD','Sub-Request Type'],['design','JIRA_DESIGN_NEEDED_FIELD','Design Needed']];
+  const norm=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
+  let fields=[];try{fields=jiraFieldMetadata_(settings);}catch(_){/* Existing Script Properties may still work. */}
+  settings.displayFields={};
+  options.forEach(function(row){const prop=String(settings.props.getProperty(row[1])||'').trim();
+    if(prop && !/^customfield_\d+$/.test(prop))throw new Error('Invalid '+row[1]+' custom field ID.');
+    const match=fields.find(function(f){return norm(f.name)===norm(row[2])&&/^customfield_\d+$/.test(String(f.id||''));});
+    settings.displayFields[row[0]]=prop||match&&String(match.id)||'';
+  });
 }
 function jiraFields_(settings) {
   return Array.from(new Set(['summary','status','assignee','project','components','issuelinks','created','reporter']
-    .concat(settings.custom.filter(Boolean)).concat(['JIRA_CONTACT_FIELD','JIRA_REQUEST_TYPE_FIELD','JIRA_SUB_REQUEST_FIELD','JIRA_DESIGN_NEEDED_FIELD'].map(function(n){return String(settings.props.getProperty(n)||'');}).filter(function(x){return /^customfield_\d+$/.test(x);})).concat(settings.assigneeFields||jiraAssigneeFields_(settings))));
+    .concat(settings.custom.filter(Boolean)).concat(Object.values(settings.displayFields||{}).filter(Boolean)).concat(settings.assigneeFields||jiraAssigneeFields_(settings))));
 }
 function jiraAssigneeList_(fields,settings) {
   const output=[];
@@ -1029,9 +1106,15 @@ function jiraAssigneeList_(fields,settings) {
       const o=typeof x==='object'?x:{displayName:String(x)};
       const name=String(o.displayName||o.name||o.value||'').trim();
       const email=String(o.emailAddress||o.email||'').trim().toLowerCase();
-      if(name||email)output.push({name:name,email:email});
+      if(name||email)output.push({name:name,email:email,group:settings.assigneeGroups&&settings.assigneeGroups[id]||''});
     });
   });
+  // Jira's built-in Assignee is visible in the provided screenshot; it can hold the supervisor
+  // even when the optional three custom assignee fields do not exist.
+  if(fields.assignee){const a=fields.assignee;
+    const name=String(a.displayName||a.name||a.value||'').trim();const email=String(a.emailAddress||a.email||'').toLowerCase().trim();
+    if(name||email)output.push({name:name,email:email,group:''});
+  }
   return output;
 }
 function jiraMatchesSupervisor_(ticket,user) {
@@ -1048,7 +1131,7 @@ function jiraMapIssue_(issue, settings) {
   const subDept = jiraText_(cf[3] ? f[cf[3]] : null) || jiraText_(f.components) || '';
   return {
     jira_ticket_no: text_(issue.key, 'Jira key', 80, true),
-    location: text_(jiraText_(cf[0] ? f[cf[0]] : null) || f.summary || 'Not specified', 'Location', 240, false),
+    location: text_(jiraText_(cf[0] ? f[cf[0]] : null) || '', 'IESM_Location', 240, false),
     engineer_name: text_(jiraText_(cf[1] ? f[cf[1]] : null) || jiraText_(f.assignee) || 'Unassigned', 'Engineer', 160, false),
     status: text_(jiraText_(f.status) || 'Unknown', 'Status', 100, false),
     department: text_(projectName, 'Department', 160, false),
@@ -1056,11 +1139,12 @@ function jiraMapIssue_(issue, settings) {
     sub_department: text_(subDept, 'Sub-department', 180, false),
     summary: text_(f.summary || '', 'Summary', 400, false),
     jira_assignees:JSON.stringify(jiraAssigneeList_(f,settings)),
+    jira_assignment_group:(jiraAssigneeList_(f,settings).find(function(a){return a.group;})||{}).group||'',
     issue_links_json:JSON.stringify(jiraIssueLinks_(f.issuelinks)),
-    created:String(f.created||''),contact_number:jiraText_(f[settings.props.getProperty('JIRA_CONTACT_FIELD')]||'').slice(0,60),
-    request_type:jiraText_(f[settings.props.getProperty('JIRA_REQUEST_TYPE_FIELD')]||'').slice(0,160),
-    sub_request_type:jiraText_(f[settings.props.getProperty('JIRA_SUB_REQUEST_FIELD')]||'').slice(0,160),
-    design_needed:jiraText_(f[settings.props.getProperty('JIRA_DESIGN_NEEDED_FIELD')]||'').slice(0,80),
+    created:String(f.created||''),contact_number:jiraText_(f[settings.displayFields&&settings.displayFields.contact]||'').slice(0,60),
+    request_type:jiraText_(f[settings.displayFields&&settings.displayFields.request]||'').slice(0,160),
+    sub_request_type:jiraText_(f[settings.displayFields&&settings.displayFields.subRequest]||'').slice(0,160),
+    design_needed:jiraText_(f[settings.displayFields&&settings.displayFields.design]||'').slice(0,80),
     reporter:jiraText_(f.reporter).slice(0,160),jira_assignee:jiraText_(f.assignee).slice(0,160)
   };
 }
@@ -1072,12 +1156,16 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
     const existing = rows_(ss, 'Tickets');
     const users = rows_(ss, 'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
     const normalize=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
+    const aliases={vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
+    const approved=['rajuvenkatesh','murugeshsubbappa','ayush','guna','balakrishanan','kalai','vasant','prakash','thangapandi','suresh','kartikeyan','kartik'];
+    const approvedName=function(v){const key=normalize(v);return approved.indexOf(aliases[key]||key)!==-1;};
     const resolvedSupervisor=function(t){
       let assignees=[];try{assignees=JSON.parse(t.jira_assignees||'[]');}catch(_){}
-      const matched=users.filter(function(u){
+      const matched=users.filter(function(u){if(!approvedName(u.name))return false;
         const workEmail=String(u.email||'').toLowerCase();
         const emailName=workEmail.endsWith('@sadhguru.org')?normalize(workEmail.split('@')[0].replace(/-ext$/,'').replace(/\./g,' ')):'';
-        return assignees.some(function(a){const name=normalize(a.name);return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&(name===normalize(u.name)||name===emailName));});
+        return assignees.some(function(a){const name=normalize(a.name);const named=aliases[name]||name;
+          return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&approvedName(name)&&(named===(aliases[normalize(u.name)]||normalize(u.name))||name===emailName));});
       });
       return matched.length===1 ? matched[0].id : '';
     };
@@ -1145,7 +1233,7 @@ function listJiraProjects(sessionToken) {
 function syncJiraTickets(sessionToken, payload) {
   requireRole_(db_(), ['admin'], sessionToken);
   const settings = jiraSettings_();
-  jiraResolveAssigneeFields_(settings);
+  jiraResolveAssigneeFields_(settings);jiraResolveLocationField_(settings);jiraResolveDisplayFields_(settings);
   const project = 'CIVIL'; // Civil Service Desk only, regardless of client payload.
   const extra = String(settings.props.getProperty('JIRA_EXTRA_JQL') || '').trim();
   const jql = 'project = ' + project + (extra ? ' AND (' + extra + ')' : '') + ' ORDER BY updated DESC';
@@ -1176,8 +1264,8 @@ function syncJiraTickets(sessionToken, payload) {
   const counts = upsertJiraIssues_(sessionToken, ['admin'], results, settings);
   return {created: counts.created, updated: counts.updated, fetched: results.length,
     limited: total !== null && startAt < total, project: project, requestMethod: 'GET',
-    supervisorMapping:settings.assigneeFields&&settings.assigneeFields.length?'configured':'manual',
-    warning:settings.assigneeMappingWarning||''};
+    supervisorMapping:settings.assigneeFields&&settings.assigneeFields.length?'custom fields + built-in Assignee':'built-in Assignee',
+    warning:[settings.assigneeMappingWarning||'',settings.locationWarning||''].filter(Boolean).join(' ')};
 }
 
 /** Admin: exact CIVIL issue lookup, comments, links and budget summaries. */
@@ -1185,7 +1273,7 @@ function fetchJiraTicketByKey(sessionToken, issueKey) {
   requireRole_(db_(), ['admin'], sessionToken);
   const key=jiraIssueKey_(issueKey);
   if (key.split('-')[0]!=='CIVIL') throw new Error('Only Civil Service Desk (CIVIL) tickets are permitted.');
-  const settings=jiraSettings_();jiraResolveAssigneeFields_(settings);
+  const settings=jiraSettings_();jiraResolveAssigneeFields_(settings);jiraResolveLocationField_(settings);jiraResolveDisplayFields_(settings);
   const issue=jiraRequest_(settings,'/rest/api/2/issue/'+encodeURIComponent(key),{fields:'*all',expand:'renderedFields'});
   if (!issue || String(issue.key||'').toUpperCase()!==key) throw new Error('Jira did not return the expected issue.');
   let fieldLabels={};try{jiraRequest_(settings,'/rest/api/2/field').forEach(function(f){fieldLabels[f.id]=String(f.name||f.id);});}catch(_){/* Keep field IDs when metadata is unavailable. */}
@@ -1283,7 +1371,7 @@ function listJiraQueueIssues(sessionToken,deskId,queueId,startInput) {
   if (!page || !Array.isArray(page.values)) throw new Error('Unexpected queue issue response.');
   return {issues:page.values.map(function(issue){
     const f=issue.fields||{};
-    return {key:String(issue.key||''),summary:String(f.summary||''),status:jiraText_(f.status)||'Unknown'};
+    return {key:String(issue.key||''),summary:String(f.summary||''),status:jiraText_(f.status)||'Unknown',assignee:jiraText_(f.assignee)||''};
   }).filter(function(issue){return /^[A-Z][A-Z0-9_]{1,29}-[1-9]\d{0,11}$/.test(issue.key);}),
   next:page.isLastPage===true||page.values.length<50?null:start+page.values.length};
 }
@@ -1522,7 +1610,7 @@ function syncCspRoster(sessionToken) {
     let linkedTickets=0;
     tickets.filter(function(t){return !t.assigned_supervisor_id;}).forEach(function(t){
       let people=[];try{people=JSON.parse(t.jira_assignees||'[]');}catch(_){}
-      const matched=users.filter(function(u){return (u.role==='supervisor'||String(u.can_supervise)==='true')&&people.some(function(a){return (u.email && a.email && String(u.email).toLowerCase()===String(a.email).toLowerCase()) || (a.name && (norm(a.name)===norm(u.name) || (aliases[norm(u.name)]||[]).indexOf(norm(a.name))>=0));});});
+      const matched=users.filter(function(u){if(!approvedName(u.name))return false;return (u.role==='supervisor'||String(u.can_supervise)==='true')&&people.some(function(a){return (u.email && a.email && String(u.email).toLowerCase()===String(a.email).toLowerCase()) || (a.name && (norm(a.name)===norm(u.name) || (aliases[norm(u.name)]||[]).indexOf(norm(a.name))>=0));});});
       if(matched.length===1){t.assigned_supervisor_id=matched[0].id;t.assigned_by='jira';t.assigned_at=new Date().toISOString();t.assignment_status='assigned';write_(ss,'Tickets',t);linkedTickets++;}
     });
     return {created:created,existing:kept,jiraEmailSuggestions:verified,ticketsLinked:linkedTickets,needsReview:CSP_SUPERVISOR_ROSTER.length-verified,notes:'Add manager and check Jira identity/email before enabling sign-in. Leads acting as supervisors need a reviewing lead.'};
@@ -1548,17 +1636,68 @@ function listCivilTickets(sessionToken,section) {
  * Spoken text is transmitted to the configured Google model ONLY when the supervisor clicks Analyse.
  */
 function sitePulseGemini_(prompt) {
-  const p=PropertiesService.getScriptProperties();const key=p.getProperty('GEMINI_API_KEY');
+  const p=PropertiesService.getScriptProperties(),key=p.getProperty('GEMINI_API_KEY');
   if(!key)throw new Error('AI is not configured. Use the manual entry controls.');
-  const model=p.getProperty('GEMINI_MODEL')||'gemini-2.5-flash';
-  if(!/^[a-z0-9._-]+$/i.test(model))throw new Error('Invalid model configuration.');
-  const result=UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
-    method:'post',contentType:'application/json',headers:{'x-goog-api-key':key},muteHttpExceptions:true,
+  const configured=String(p.getProperty('GEMINI_MODEL')||'gemini-2.5-flash').replace(/^models\//,'');
+  if(!/^[a-z0-9._-]+$/i.test(configured))throw new Error('Invalid AI model setting.');
+  const base='https://generativelanguage.googleapis.com/v1beta/models/';
+  const headers={'x-goog-api-key':key};
+  const request=function(model){return UrlFetchApp.fetch(base+encodeURIComponent(model)+':generateContent',{
+    method:'post',contentType:'application/json',headers:headers,muteHttpExceptions:true,
     payload:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.1,responseMimeType:'application/json'}})
+  });};
+  let model=configured,response=request(model);
+  // HTTP 404 usually means the configured model is not available to this particular API key.
+  // Ask Google for supported models and retry a compatible model, rather than guessing names.
+  if(response.getResponseCode()===404){
+    const listing=UrlFetchApp.fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=100',{
+      method:'get',headers:headers,muteHttpExceptions:true});
+    if(listing.getResponseCode()===200){
+      const available=JSON.parse(listing.getContentText()).models||[];
+      const compatible=available.filter(function(m){return (m.supportedGenerationMethods||[]).indexOf('generateContent')!==-1&&/^models\/gemini-/i.test(String(m.name||''));});
+      const choice=compatible.find(function(m){return m.name!=='models/'+configured&&/flash/i.test(String(m.name||''));})||
+        compatible.find(function(m){return m.name!=='models/'+configured;})||compatible[0];
+      if(choice){model=String(choice.name).replace(/^models\//,'');response=request(model);}
+    }
+  }
+  if(response.getResponseCode()!==200)throw new Error('AI interpretation unavailable (HTTP '+response.getResponseCode()+', model '+model+'). Check GEMINI_API_KEY and GEMINI_MODEL; you can enter resources manually.');
+  const obj=JSON.parse(response.getContentText()),parts=((((obj.candidates||[])[0]||{}).content||{}).parts||[]);
+  const raw=parts.map(function(x){return x.text||'';}).join('');
+  if(!raw)throw new Error('AI returned no report data. Please retry or enter quantities manually.');
+  return JSON.parse(raw);
+}
+/** Conservative offline fallback: only explicit digit + clear English item phrase.
+ * Does not guess missing quantities or convert number words. */
+function cspLiteralSpeech_(speech,items){
+  const aliases={
+    'Masons':['masons?'], 'Helpers':['helpers?'], 'FC':['f\\.?c\\.?'],
+    'Cement Bags':['cement\\s+bags?','bags?\\s+of\\s+cement'],
+    'M Sand':['m\\s*[- ]?sand'], 'P Sand':['p\\s*[- ]?sand'],
+    'Jelly/Chips':['jelly','chips?'], 'Bricks':['bricks?'],
+    'Solid Blocks':['solid\\s+blocks?'], 'Tiles':['tiles?'],
+    'Tractor':['tractors?'], 'Crane':['cranes?'], 'JCB':['j\\s*\\.?c\\s*\\.?b'],
+    'Scaffolding':['scaffolding']
+  };
+  const quantity='([0-9]+(?:\\.[0-9]+)?)';
+  const matched=[],resources={};
+  Object.keys(aliases).forEach(function(label){
+    const item=items.find(function(i){return String(i.name||'').toLowerCase()===label.toLowerCase();});
+    if(!item)return;
+    for(const phrase of aliases[label]){
+      const r1=new RegExp('(?:^|\\b)'+quantity+'\\s*(?:units?\\s+)?'+phrase+'\\b','i');
+      const r2=new RegExp('\\b'+phrase+'\\s*[:= -]*'+quantity+'\\b','i');
+      const match=speech.match(r1)||speech.match(r2);
+      if(!match)continue;
+      const n=Number(match[1]);if(!Number.isFinite(n)||n<=0)continue;
+      matched.push({item_id:String(item.id),quantity:n});resources[label]=String(n)+' '+String(item.rate_unit||'unit');break;
+    }
   });
-  if(result.getResponseCode()!==200)throw new Error('AI interpretation is currently unavailable (HTTP '+result.getResponseCode()+'). You can enter the report manually.');
-  const obj=JSON.parse(result.getContentText());const content=(((obj.candidates||[])[0]||{}).content||{}).parts||[];
-  const raw=content.map(function(x){return x.text||'';}).join('');return JSON.parse(raw);
+  const low=speech.toLowerCase();
+  const status=/\bpartially\s+completed\b/.test(low)?'partially completed':
+    /\b(completed|finished|work done)\b/.test(low)?'completed':'in progress';
+  return {workDone:speech,completionStatus:status,resources:resources,
+    questions: /\b(completed|finished|partially\s+completed|in progress|ongoing)\b/.test(low)?[]:['Was the work completed, partially completed, or in progress?'],
+    lines:matched};
 }
 function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
   const ss=db_();const engineer=requireRole_(ss,['supervisor'],sessionToken);
@@ -1568,13 +1707,19 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
   const items=rows_(ss,'Master_Items');
   const fields=['Masons','Helpers','FC','Etc','Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles','Other Materials','Tractor','Crane','JCB','Scaffolding','Other Equipment'];
   const catalog=items.map(function(i){return {id:i.id,name:i.name,type:i.type,unit:i.rate_unit||'unit'};});
-  const answer=sitePulseGemini_(
+  let answer,mode='ai',warning='';
+  try {answer=sitePulseGemini_(
     'You help a civil engineer in '+lang+' create a daily site report. Preserve every numeric quantity and unit EXACTLY, do not convert units or infer values, including words for numbers. '+
     'Ask at most two short clarifying questions ONLY if work description or completion status is materially ambiguous. '+
     'If a resource was not mentioned, return Not Used. If a field does not apply, return Not Applicable. '+
     'Return JSON ONLY with {workDone:string,completionStatus:"completed"|"partially completed"|"in progress",resources:object keyed by exact labels,questions:string[],lines:[{item_id:string,quantity:number}]}. '+
     'WorkDone must be brief and accurate. In lines, only include a catalog item with an unambiguous, explicitly spoken numerical quantity, never infer or translate word-number to digits. '+
     'Do not fabricate dates, locations, ticket numbers or names. Exact labels: '+JSON.stringify(fields)+'. Catalog: '+JSON.stringify(catalog)+'. Transcript: '+speech);
+  }catch(error){
+    mode='literal';answer=cspLiteralSpeech_(speech,items);
+    warning='AI interpretation unavailable: generated only from explicitly typed/spoken numbers and recognizable English item names. Verify every resource, and manually add anything missed. For local languages, enter resources manually until the AI connection is fixed.';
+    console.warn('Gemini generation fallback: '+String(error&&error.message||error));
+  }
   const allowed=Object.fromEntries(items.map(function(i){return [String(i.id),i];}));
   const numericalEvidence=Array.from(speech.matchAll(/[0-9]+(?:[.,][0-9]+)?/g)).map(function(x){return Number(x[0].replace(/,/g,''));});
   const lineIds=new Set();
@@ -1594,6 +1739,16 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
       if(questions.length<2)questions.push('Please confirm the quantity and unit for '+label+'.');
     }else resources[label]=found;
   });
+  // Some models provide field quantities but omit resource IDs. Resolve only exact
+  // numeric quantities that already occur in the transcript; never invent amounts.
+  const added=new Set(lines.map(function(l){return String(l.item_id);}));
+  fields.forEach(function(label){
+    const item=items.find(function(i){return String(i.name).toLowerCase()===label.toLowerCase();});
+    if(!item||added.has(String(item.id)))return;
+    const m=String(resources[label]||'').match(/^\s*([0-9]+(?:\.[0-9]+)?)(?:\s|$)/);
+    if(!m)return;const value=Number(m[1]);
+    if(value>0&&numericalEvidence.indexOf(value)!==-1){lines.push({item_id:String(item.id),quantity:value});added.add(String(item.id));}
+  });
   let workDone=String(answer.workDone||'').slice(0,3000).trim();
   if(digitNotSpoken(workDone)){
     // Do not use an AI summary that introduced a number missing from the transcript.
@@ -1603,7 +1758,7 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
   const completion=['completed','partially completed','in progress'].indexOf(String(answer.completionStatus||'').toLowerCase())>=0?String(answer.completionStatus).toLowerCase():'in progress';
   if(!workDone || workDone==='Not Used')questions.unshift('What work was done on site today?');
   const report=[
-    'DAILY SITE REPORT','Ticket No: '+ticket.jira_ticket_no,'Work Date: '+Utilities.formatDate(new Date(),PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata','dd/MM/yyyy'),
+    'DAILY SITE REPORT','Ticket No: '+ticket.jira_ticket_no,'Work Date: '+String(payload.work_date||Utilities.formatDate(new Date(),PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata','yyyy-MM-dd')).split('-').reverse().join('/'),
     'Project Location: '+(ticket.location||'Not Applicable'),'Supervisor name: '+engineer.name,'Work Done:',workDone||'Not Applicable','',
     'Labours',...fields.slice(0,4).map(function(k){return k+': '+resources[k];}),'',
     'Materials Used',...fields.slice(4,12).map(function(k){return k+': '+resources[k];}),'',
@@ -1612,7 +1767,7 @@ function interpretWorkVoice(sessionToken,transcript,language,ticketId) {
   ].join('\n');
   // The entire report remains a draft until the engineer explicitly verifies it.
   return {reportText:report,work_done:workDone,completion_status:completion,
-    work_measure:0,work_measure_unit:'',lines:lines,questions:questions,resources:resources,mode:'ai'};
+    work_measure:0,work_measure_unit:'',lines:lines,questions:questions,resources:resources,mode:mode,warning:warning};
 }
 
 function localizeRevision(sessionToken,revisionText,language) {
@@ -1629,7 +1784,7 @@ function localizeRevision(sessionToken,revisionText,language) {
  */
 function seedLegacyCspItems(sessionToken) {
   const defaults={
-    labour:['Masons','Helpers','FC'],
+    labour:['Masons','Helpers','FC','Etc'],
     material:['Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles','Other Materials'],
     machine:['Tractor','Crane','JCB','Scaffolding','Other Equipment']
   };
@@ -1673,7 +1828,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'saveTicketLead','syncCspRoster','setTicketPriority','listCivilTickets',
   'interpretWorkVoice','localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
-  'getLiveUpdates','sendDirectMessage','markDirectMessagesRead','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
+  'getLiveUpdates','getDirectMessages','sendDirectMessage','markDirectMessagesRead','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
   'renameReportingWorkbookColumn','importScreenshotStaffProfiles'
 ]);
 
@@ -1691,7 +1846,7 @@ function doPost(e) {
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
       addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority,
       listCivilTickets, interpretWorkVoice, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
-      sendPushTest, saveMenuLabels, getLiveUpdates, sendDirectMessage,markDirectMessagesRead,
+      sendPushTest, saveMenuLabels, getLiveUpdates,getDirectMessages,sendDirectMessage,markDirectMessagesRead,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
     };
     const handler = functions[method];
@@ -1857,17 +2012,25 @@ function saveMenuLabels(sessionToken,labels) {
 /** Scoped read-only updates, lightweight enough for visible-tab polling. */
 function getLiveUpdates(sessionToken){
   const ss=db_();const user=identity_(ss,sessionToken);
-  const allItems=rows_(ss,'Master_Items').map(publicRow_);
+  const allRates=itemRates_(ss);
+  const allItems=effectivePrices_(rows_(ss,'Master_Items').map(publicRow_),allRates);
   const items=user.role==='supervisor' ? allItems.map(function(i){return {id:i.id,type:i.type,name:i.name,rate_unit:i.rate_unit||'unit'};}) : allItems;
   const contacts=rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';})
     .map(function(u){return {id:u.id,name:u.name,role:u.role};});
   return {tickets:scopedTickets_(ss,user),reports:reportsFor_(ss,user),notifications:notificationRows_(ss,user.id),
     messages:messagesFor_(ss,user.id),items:items,contacts:contacts,
-    itemRates:user.role==='supervisor'?[]:rows_(ss,'Item_Rates').map(publicRow_).slice(-750).reverse()};
+    itemRates:allRates.filter(function(r){return user.role!=='supervisor'||rateDay_(r)<=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');}).map(publicRow_).reverse()};
 }
 function messagesFor_(ss,userId){
   return rows_(ss,'Direct_Messages').filter(function(m){return String(m.sender_id)===String(userId)||String(m.recipient_id)===String(userId);})
     .sort(function(a,b){return String(b.created_at).localeCompare(String(a.created_at));}).slice(0,150).reverse().map(publicRow_);
+}
+function getDirectMessages(sessionToken){
+  // Lightweight chat refresh: avoids loading Jira, reports, resources and rate history.
+  const id=PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if(!id)throw new Error('Project is not initialized.');
+  const ss=SpreadsheetApp.openById(id),me=identity_(ss,sessionToken);
+  return {messages:messagesFor_(ss,me.id)};
 }
 function sendDirectMessage(sessionToken,recipientId,body){
   return transaction_(function(ss){
@@ -1883,7 +2046,9 @@ function sendDirectMessage(sessionToken,recipientId,body){
 function markDirectMessagesRead(sessionToken,peerId){
   return transaction_(function(ss){
     const actor=identity_(ss,sessionToken);let count=0;
-    rows_(ss,'Direct_Messages').filter(function(m){return String(m.recipient_id)===String(actor.id)&&String(m.sender_id)===String(peerId)&&!m.read_at;}).forEach(function(m){m.read_at=new Date().toISOString();write_(ss,'Direct_Messages',m);count++;});
+    const seen=[];
+    rows_(ss,'Direct_Messages').filter(function(m){return String(m.recipient_id)===String(actor.id)&&String(m.sender_id)===String(peerId)&&!m.read_at;}).forEach(function(m){m.read_at=new Date().toISOString();write_(ss,'Direct_Messages',m);seen.push(String(m.id));count++;});
+    if(seen.length){const stamp=new Date().toISOString();rows_(ss,'Notifications').filter(function(n){return String(n.recipient_id)===String(actor.id)&&n.type==='direct_message'&&!n.read_at&&seen.indexOf(String(n.target_id))!==-1;}).forEach(function(n){n.read_at=stamp;write_(ss,'Notifications',n);});}
     return {count:count};
   });
 }

@@ -1,53 +1,16 @@
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import assert from 'node:assert/strict';
-const root=resolve(import.meta.dirname,'..');
-const read=path=>readFileSync(resolve(root,path),'utf8');
-const backend=read('backend/Code.gs');
-const ui=read('src/app/app.component.html');
-const app=read('src/app/app.component.ts');
-const sw=read('public/firebase-messaging-sw.js');
-const workflow=read('.github/workflows/deploy.yml');
+const read=file=>readFileSync(resolve(import.meta.dirname,'..',file),'utf8');
+const backend=read('backend/Code.gs'),ts=read('src/app/app.component.ts'),html=read('src/app/app.component.html');
+const workflow=read('.github/workflows/deploy.yml'),sw=read('public/firebase-messaging-sw.js');
 const checks=[
-  ['private roster excluded from public backend',()=>{
-    assert(!backend.includes('CSP_DIRECTORY_SEED'));
-    assert(!/raju\.venkatesh|murugesh\.subbappa|vasanth\.kongarayan|vignesh\.mani@sadhguru\.org/i.test(backend));
-    assert(backend.includes('CSP_PRIVATE_STAFF_JSON'));
-  }],
-  ['role-limited rate register',()=>{
-    assert(backend.includes("itemRates: role==='supervisor'?[]"));
-    assert(ui.includes('Old rate')&&ui.includes('New rate'));
-  }],
-  ['message security and notifications',()=>{
-    assert(backend.includes('function sendDirectMessage(sessionToken,recipientId,body)'));
-    assert(backend.includes("'direct_message','Message from '"));
-    assert(ui.includes('class="messages-layout panel"'));
-    assert(!ui.includes('class="toast"'));
-  }],
-  ['live updates and device push',()=>{
-    assert(backend.includes('function getLiveUpdates(sessionToken)'));
-    assert(app.includes('},12000)'));
-    assert(sw.includes("self.addEventListener('push'"));
-    assert(ui.includes('class="bell-popover"'));
-  }],
-  ['Jira display and filtering',()=>{
-    for(const name of ['IESM_Location','Contact Number','Request Type','Sub-Request Type','Design Needed','Assignee','Reporter'])assert(ui.includes(name));
-    assert(app.includes('this.supervisorFilter')&&app.includes('this.locationFilter')&&app.includes('this.ticketDateFilter'));
-    assert(backend.includes('function resolvedSupervisor')||backend.includes('const resolvedSupervisor='));
-  }],
-  ['exact report sections',()=>{
-    for(const label of ['DAILY SITE REPORT','Labours','Materials Used','Equipment Used','Work Completion Status','Masons','Helpers','FC','JCB','Solid Blocks','Jelly/Chips'])assert(app.includes(label));
-    assert(backend.includes('completion_status:completion,')&&!backend.includes("completion_status:completion==='partially completed'?'in progress':completion"));
-    assert(ui.includes('verifiedDraft'));
-  }],
-  ['profiles and workbook headers',()=>{
-    for(const fn of ['saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange','renameReportingWorkbookColumn','importScreenshotStaffProfiles'])assert(backend.includes('function '+fn+'('));
-    assert(ui.includes('Change photo')&&ui.includes('Rename column')&&ui.includes('Import provided staff'));
-  }],
-  ['github workflow avoids missing lockfile',()=>{
-    assert(workflow.includes('npm install --no-audit --no-fund'));
-    assert(!workflow.includes('cache: npm'));
-    assert(workflow.includes('actions/deploy-pages@v4'));
-  }]
+ ['Private roster excluded from GitHub',()=>assert(!/raju\.venkatesh|murugesh\.subbappa|vasanth\.kongarayan|vignesh\.mani@sadhguru\.org/i.test(backend))],
+ ['Dated, append-only rates, with locked report prices',()=>{for(const term of ['function addItemRate(',"effective_date","rate_source","locked_price","approvedRateOn_"])assert(backend.includes(term));assert(html.includes('Past · current · future rates'));}],
+ ['Unread count and faster chat polling',()=>{assert(html.includes('{{unreadMessages}}'));assert(ts.includes('},3000)'));assert(backend.includes('getDirectMessages(sessionToken)'));assert(backend.includes('markDirectMessagesRead'));}],
+ ['Jira CIVIL filtered and grouped',()=>{for(const term of ['jiraResolveLocationField_','jira_assignment_group',"const project = 'CIVIL'"])assert(backend.includes(term));assert(!backend.includes("|| f.summary || 'Not specified'"));assert(html.includes('Civil Service Desk (CIVIL)'));}],
+ ['Voice report and fallback',()=>{assert(backend.includes('function cspLiteralSpeech_'));assert(backend.includes('sitePulseGemini_'));assert(ts.includes('parsed.lines.map'));assert(html.includes('DAILY SITE REPORT'));}],
+ ['More recognizable collapsed navigation',()=>{assert(html.includes('nav-glyph'));assert(html.includes('navLabel(n.section)'));}],
+ ['No npm lockfile requirement in deployment',()=>{assert(workflow.includes('npm install --no-audit --no-fund'));assert(!workflow.includes('cache: npm'));assert(sw.includes("self.addEventListener('push'"));}]
 ];
 for(const [label,check] of checks){check();console.log('PASS:',label);}

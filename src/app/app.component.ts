@@ -15,6 +15,7 @@ export class AppComponent implements OnInit,OnDestroy {
   readonly nav=NAV;
   readonly title='CSP SitePulse';
   readonly todayIso=new Date().toISOString();
+  readonly todayWorkDate=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
   lang:Lang = this.readLang();
   isCompact = localStorage.getItem('csp.sidebar')==='true';
   isMobileMenuOpen=false;
@@ -27,7 +28,7 @@ export class AppComponent implements OnInit,OnDestroy {
   email='';code='';
   message=''; messageKind:'success'|'error'|'info'='info';
   search='';ticketStatus='all';supervisorFilter='all';locationFilter='all';ticketDateFilter='';resourceFilter='all';
-  ticketGroupFilter='all'; bellOpen=false; selectedPeerId='';newMessage='';
+  ticketGroupFilter='all';jiraAssignmentGroup='all'; bellOpen=false; selectedPeerId='';newMessage=''; sendingMessage=false; private chatTimer:ReturnType<typeof setInterval>|null=null;private isChatPolling=false; private readInFlight=false;
   isLiveSyncing=false; private liveTimer:ReturnType<typeof setInterval>|null=null;
   reportPreview=''; reportQuestions:string[]=[];followUpAnswer=''; reportResourceFields:Record<string,string>={};
   selectedTicket:Ticket|null=null;
@@ -51,6 +52,10 @@ export class AppComponent implements OnInit,OnDestroy {
   reviewEdits:Record<string,number>={};
   viewReport:Report|null=null;
   editResource:Partial<Resource>={type:'material',name:'',current_price:0,quantity:0,rate_unit:'unit'};
+  effectiveRateDate=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date());rateSource='Market';rateNote='';
+  newRateItemId='';newRatePrice:number|null=null;newRateDate=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date());newRateSource='Market';newRateNote='';
+  selectedRateId=''; customRate:number|null=null;customRateNote='';
+
   editUser:Partial<Staff>={role:'supervisor',name:'',email:'',manager_id:''};
   workbook:Workbook|null=null;
   selectedTab=''; workbookPage=1;
@@ -63,7 +68,8 @@ export class AppComponent implements OnInit,OnDestroy {
   constructor(public readonly api:ApiService,private readonly push:PushService) {}
   ngOnInit():void {
     if (this.api.hasSession) void this.loadBootstrap(true);
-    this.liveTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.data&&!this.busy&&!this.isBooting)void this.refreshLive();},12000);
+    this.liveTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.data&&this.section!=='messages'&&!this.busy&&!this.isBooting)void this.refreshLive();},8000);
+    this.chatTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.section==='messages'&&this.data&&!this.isBooting)void this.refreshChats();},3000);
     window.addEventListener('focus',this.focusHandler);
     if ('serviceWorker' in navigator) {
       const register=()=>navigator.serviceWorker.register('firebase-messaging-sw.js',{scope:'./'}).catch(()=>{});
@@ -71,7 +77,7 @@ export class AppComponent implements OnInit,OnDestroy {
       else window.addEventListener('load',()=>{void register();},{once:true});
     }
   }
-  ngOnDestroy():void { this.recognition?.stop();if(this.liveTimer)clearInterval(this.liveTimer);window.removeEventListener('focus',this.focusHandler); }
+  ngOnDestroy():void { this.recognition?.stop();if(this.liveTimer)clearInterval(this.liveTimer);if(this.chatTimer)clearInterval(this.chatTimer);window.removeEventListener('focus',this.focusHandler); }
   private focusHandler=()=>{if(this.data)void this.refreshLive();};
   private readLang():Lang { const saved=localStorage.getItem('csp.lang');return (LANGUAGES.some(x=>x.code===saved)?saved:'en-IN') as Lang; }
   setLang(next:Lang):void {this.lang=next;localStorage.setItem('csp.lang',next);document.documentElement.lang=next.slice(0,2);}
@@ -81,9 +87,21 @@ export class AppComponent implements OnInit,OnDestroy {
   itemUnit(id:string):string{return this.data?.items.find(i=>i.id===id)?.rate_unit||'unit';}
   get role():Role {return this.data?.user.role||'supervisor';}
   get visibleNav(){return this.nav.filter(n=>n.roles.includes(this.role));}
+  get unreadMessages():number{return (this.data?.messages||[]).filter(m=>m.recipient_id===this.data?.user.id&&!m.read_at).length;}
   get unread():number{return this.data?.notifications.filter(n=>!n.read_at).length||0;}
-  get locations():string[]{return Array.from(new Set((this.data?.tickets||[]).map(t=>String(t.location||'').trim()).filter(Boolean))).sort();}
-  get ticketGroups(){const all=this.data?.tickets||[];return [
+  readonly supervisorNames=['Raju venkatesh','Murugesh Subbappa','Ayush','Guna','Balakrishanan','Kalai','Vasant','Prakash','Thangapandi','SURESH','KARTIKEYAN','KARTIK'];
+  private normalizeName(v:unknown):string{return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
+  private isCspSupervisorTicket(t:Ticket):boolean {
+    if(t.project_key&&String(t.project_key).toUpperCase()!=='CIVIL')return false;
+    const people=[t.jira_assignee,t.engineer_name];
+    try {const named=JSON.parse(String(t.jira_assignees||'[]')); if(Array.isArray(named))people.push(...named.map((x:{name?:string})=>x.name||''));}catch(_){}
+    const aliases:Record<string,string>={vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
+    const allowed=new Set(this.supervisorNames.map(x=>this.normalizeName(x)));
+    return people.some(x=>{const n=this.normalizeName(x);return allowed.has(aliases[n]||n);});
+  }
+  get cspTickets():Ticket[]{return (this.data?.tickets||[]).filter(t=>this.isCspSupervisorTicket(t));}
+  get locations():string[]{return Array.from(new Set(this.cspTickets.map(t=>String(t.location||'').trim()).filter(Boolean))).sort();}
+  get ticketGroups(){const all=this.cspTickets;return [
     {id:'all',name:'All tickets',count:all.length},
     {id:'new',name:'New',count:all.filter(t=>/new|ready to assign/i.test(t.status)).length},
     {id:'r&d',name:'R&D',count:all.filter(t=>/r&d|research/i.test(t.status)).length},
@@ -92,11 +110,12 @@ export class AppComponent implements OnInit,OnDestroy {
     {id:'execution',name:'Execution_Status-Wise',count:all.filter(t=>/execution|in progress|site inspection/i.test(t.status)).length}
   ];}
   get matchingTickets():Ticket[] {
-    const q=this.search.trim().toLowerCase();return (this.data?.tickets||[]).filter(t=>{
+    const q=this.search.trim().toLowerCase();return this.cspTickets.filter(t=>{
       const s=(String(t.status||'')+' '+String(t.assignment_status||'')).toLowerCase();
       const closed=/done|closed|resolved|completed|cancelled|canceled/.test(s);
       return (this.ticketStatus==='all'||(this.ticketStatus==='open'?!closed:closed)) &&
         (this.supervisorFilter==='all'||String(t.assigned_supervisor_id)===this.supervisorFilter) &&
+        (this.jiraAssignmentGroup==='all'||String(t.jira_assignment_group||'')===this.jiraAssignmentGroup) &&
         (this.locationFilter==='all'||String(t.location||'')===this.locationFilter) &&
         (!this.ticketDateFilter||String(t.created||'').slice(0,10)===this.ticketDateFilter) &&
         (this.ticketGroupFilter==='all'||this.ticketGroupFilter==='new'&&/new|ready to assign/i.test(t.status)||this.ticketGroupFilter==='r&d'&&/r&d|research/i.test(t.status)||this.ticketGroupFilter==='design'&&/design/i.test(t.status)||this.ticketGroupFilter==='estimation'&&/estimat/i.test(t.status)||this.ticketGroupFilter==='execution'&&/execution|in progress|site inspection/i.test(t.status)) &&
@@ -110,7 +129,11 @@ export class AppComponent implements OnInit,OnDestroy {
   get adminUsers():Staff[]{return this.data?.users||[];}
   get visibleMessages():DirectMessage[] {return (this.data?.messages||[]).filter(m=>(m.sender_id===this.selectedPeerId&&m.recipient_id===this.data?.user.id)||(m.recipient_id===this.selectedPeerId&&m.sender_id===this.data?.user.id));}
   get currentPeerName():string {return this.data?.contacts.find(c=>c.id===this.selectedPeerId)?.name||'Select a person';}
-  get rateHistory(){return (this.data?.itemRates||[]).filter(r=>this.resourceFilter==='all'||r.category===this.resourceFilter);}
+  get rateHistory(){return (this.data?.itemRates||[]).filter(r=>this.resourceFilter==='all'||r.category===this.resourceFilter).sort((a,b)=>String(b.effective_date||b.changed_at).localeCompare(String(a.effective_date||a.changed_at)));}
+  rateStatus(r:import('./models').RateChange):string{const day=String(r.effective_date||r.changed_at).slice(0,10);if(day>this.todayWorkDate)return 'Future';const newest=this.rateOptions(r.item_id)[0];return newest?.id===r.id?'Current':'Previous';}
+  rateOptions(itemId:string):import('./models').RateChange[]{const today=this.reportDraft.work_date||this.todayWorkDate;return (this.data?.itemRates||[]).filter(r=>r.item_id===itemId&&String(r.effective_date||r.changed_at||'').slice(0,10)<=today).sort((a,b)=>String(b.effective_date||b.changed_at).localeCompare(String(a.effective_date||a.changed_at)));}
+  rateName(r:import('./models').RateChange):string{return this.fmtMoney(r.new_rate)+' / '+(r.rate_unit||'unit')+' • '+(r.effective_date||String(r.changed_at).slice(0,10))+(r.source?' • '+r.source:'');}
+  rateForLine(line:ReportLine):string{if(line.rate_id){const rate=this.data?.itemRates.find(x=>x.id===line.rate_id);if(rate)return this.rateName(rate);}return line.rate_mode==='actual'?'Actual paid: '+this.fmtMoney(line.actual_rate||0):'Auto (current approved rate)';}
   get resourceList():Resource[] {return (this.data?.items||[]).filter(i=>this.resourceFilter==='all'||i.type===this.resourceFilter);}
   get myOpenTickets():Ticket[] {return (this.data?.tickets||[]).filter(t=>t.assigned_supervisor_id===this.data?.user.id&&t.assignment_status!=='returned'&&t.assignment_status!=='completed'&&!/closed|resolved|done|cancelled|completed/i.test(t.status));}
   get assignedCount():number {return (this.data?.tickets||[]).filter(t=>!!t.assigned_supervisor_id).length;}
@@ -122,11 +145,11 @@ export class AppComponent implements OnInit,OnDestroy {
   get revisionRequests():Report[] {return (this.data?.reports||[]).filter(r=>r.status==='revision_requested' && r.supervisor_id===this.data?.user.id);}
   userName(id?:string):string{return this.data?.users?.find(u=>u.id===id)?.name || (id?'Not assigned':'Unassigned');}
   itemName(id:string):string{return this.data?.items.find(i=>i.id===id)?.name||'Unknown';}
-  fmtMoney(n:unknown):string {return new Intl.NumberFormat(this.lang,{style:'currency',currency:this.data?.currency||'INR',maximumFractionDigits:0}).format(Number(n)||0);}
+  fmtMoney(n:unknown):string {return new Intl.NumberFormat(this.lang,{style:'currency',currency:this.data?.currency||'INR',maximumFractionDigits:2}).format(Number(n)||0);}
   fmtDate(d:unknown):string {if(!d)return '—';const date=new Date(String(d));return Number.isNaN(date.getTime())?String(d):new Intl.DateTimeFormat(this.lang,{day:'numeric',month:'short',year:'numeric'}).format(date);}
   caps(s:unknown):string{return String(s||'—').replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
   trackById(_index:number,item:{id?:string}):string{return item.id||String(_index);}
-  private freshReport():ReportDraft {return {ticket_id:'',work_done:'',completion_status:'in progress',work_measure:0,work_measure_unit:'',lines:[]};}
+  private freshReport():ReportDraft {return {ticket_id:'',work_date:new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date()),work_done:'',completion_status:'in progress',work_measure:0,work_measure_unit:'',lines:[]};}
   inform(message:string,kind:'success'|'error'|'info'='info'):void{this.message=message;this.messageKind=kind;}
   dismiss():void {this.message='';}
   async startLogin():Promise<void> {
@@ -163,8 +186,18 @@ export class AppComponent implements OnInit,OnDestroy {
     if(this.isLiveSyncing||!this.api.hasSession||!this.data)return;this.isLiveSyncing=true;
     try{const fresh=await this.api.call<LiveUpdates>('getLiveUpdates');
       if(this.data){this.data={...this.data,tickets:fresh.tickets,reports:fresh.reports,notifications:fresh.notifications,messages:fresh.messages,items:fresh.items,contacts:fresh.contacts,itemRates:fresh.itemRates};}
+      if(this.section==='messages')void this.markConversationRead();
     }catch(_){/* Do not display transient polling errors; explicit Refresh reports them. */}
     finally{this.isLiveSyncing=false;}
+  }
+  async refreshChats():Promise<void>{
+    if(this.isChatPolling||!this.api.hasSession||!this.data||document.visibilityState!=='visible')return;
+    this.isChatPolling=true;
+    try {const fresh=await this.api.call<{messages:DirectMessage[]}>('getDirectMessages');
+      if(this.data){const pending=this.data.messages.filter(m=>m.id.startsWith('pending-'));this.data={...this.data,messages:[...fresh.messages,...pending]};}
+      if(this.section==='messages')void this.markConversationRead();
+    }catch(_){/* Keep last-known messages if the connection is slow. */}
+    finally{this.isChatPolling=false;}
   }
   async task(operation:()=>Promise<unknown>,success='Updated successfully.'):Promise<boolean>{
     if(this.busy)return false;this.busy=true;
@@ -178,7 +211,7 @@ export class AppComponent implements OnInit,OnDestroy {
     this.section=section;this.isMobileMenuOpen=false;this.search='';
     if(section==='workbook'&&!this.workbook)void this.loadWorkbook();
     if(section==='jira'&&!this.jiraDesks.length&&this.data?.jiraReady)void this.loadJiraDesks();
-    if(section==='messages'&&this.selectedPeerId)void this.markConversationRead();
+    if(section==='messages'&&this.selectedPeerId){void this.markConversationRead();void this.refreshChats();}
   }
   toggleSidebar():void {this.isCompact=!this.isCompact;localStorage.setItem('csp.sidebar',String(this.isCompact));}
   async onSupervisorChange():Promise<void>{
@@ -209,10 +242,12 @@ export class AppComponent implements OnInit,OnDestroy {
   async setPriority(ticket:Ticket,value:string):Promise<void>{if(!value)return;await this.task(()=>this.api.call('setTicketPriority',ticket.id,Number(value)),'Priority updated.');}
   async returnAssigned(ticket:Ticket):Promise<void>{const note=window.prompt('Reason for returning this ticket?');if(!note?.trim())return;await this.task(()=>this.api.call('returnTicket',ticket.id,note.trim()),'Ticket returned.');}
   addLine():void{if(!this.selectedItemId||!Number.isFinite(Number(this.newItemQty))||Number(this.newItemQty)<=0){this.inform('Select a resource and enter a positive quantity.','error');return;}
-    const existing=this.reportDraft.lines.find(l=>l.item_id===this.selectedItemId);
-    if(existing)existing.quantity+=Number(this.newItemQty); else this.reportDraft.lines.push({item_id:this.selectedItemId,quantity:Number(this.newItemQty)});
-    this.selectedItemId='';this.newItemQty=1;this.verifiedDraft=false;
+    if(this.customRate!==null&&(!this.customRateNote.trim()||this.customRate<0)){this.inform('For an actual purchase rate, enter a non-negative price and receipt or vendor reference.','error');return;}
+    const existing=this.reportDraft.lines.find(l=>l.item_id===this.selectedItemId&&l.rate_id===(this.selectedRateId||'')&&l.rate_mode===(this.customRate!==null?'actual':'catalog')&&(this.customRate===null||l.actual_rate===this.customRate));
+    if(existing)existing.quantity+=Number(this.newItemQty); else this.reportDraft.lines.push({item_id:this.selectedItemId,quantity:Number(this.newItemQty),rate_id:this.selectedRateId||'',rate_mode:this.customRate!==null?'actual':'catalog',actual_rate:this.customRate===null?undefined:Number(this.customRate),rate_note:this.customRateNote});
+    this.selectedItemId='';this.selectedRateId='';this.customRate=null;this.customRateNote='';this.newItemQty=1;this.verifiedDraft=false;
   }
+  selectResource(itemId:string):void{this.selectedItemId=itemId;this.selectedRateId='';this.customRate=null;this.customRateNote='';}
   removeLine(index:number):void {this.reportDraft.lines.splice(index,1);this.verifiedDraft=false;}
   startVoice():void {
     const ctor=(window as unknown as {SpeechRecognition?:new()=>SpeechEngine;webkitSpeechRecognition?:new()=>SpeechEngine}).SpeechRecognition ||
@@ -228,11 +263,11 @@ export class AppComponent implements OnInit,OnDestroy {
   async analyzeVoice():Promise<void>{if(!this.voiceTranscript.trim()){this.inform('Speak or type a transcript before generating the report.','error');return;}
     if(!this.reportDraft.ticket_id){this.inform('Select your assigned Jira ticket first.','error');return;}
     this.busy=true;
-    try{const parsed=await this.api.call<{reportText:string;questions:string[];resources:Record<string,string>;work_done:string;completion_status:string;work_measure:number;work_measure_unit:string;lines:{item_id:string;quantity:number}[]}>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id);
+    try{const parsed=await this.api.call<{reportText:string;questions:string[];resources:Record<string,string>;work_done:string;completion_status:string;work_measure:number;work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string}>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id);
       this.reportDraft.work_done=parsed.work_done;this.reportDraft.work_measure=parsed.work_measure;this.reportDraft.work_measure_unit=parsed.work_measure_unit;
-      this.reportDraft.completion_status=parsed.completion_status;this.reportDraft.lines=parsed.lines;
+      this.reportDraft.completion_status=parsed.completion_status;this.reportDraft.lines=parsed.lines.map(l=>({...l,rate_id:'',rate_mode:'catalog'}));
       this.reportQuestions=parsed.questions||[];this.reportResourceFields=parsed.resources||{};this.reportPreview=parsed.reportText;
-      this.verifiedDraft=false;this.inform(this.reportQuestions.length?'Please answer the important missing questions.':'Draft generated. Check every quantity.','info');
+      this.verifiedDraft=false;this.inform(parsed.warning|| (this.reportQuestions.length?'Please answer the important missing questions.':'Draft generated. Check every quantity.'),'info');
     }catch(e){this.inform(this.errorText(e),'error');}
     finally{this.busy=false;}
   }
@@ -245,7 +280,7 @@ export class AppComponent implements OnInit,OnDestroy {
     if(success){this.reportDraft=this.freshReport();this.voiceTranscript='';this.reportPreview='';this.reportQuestions=[];this.revisionFor=null;this.verifiedDraft=false;this.go('reports');}
   }
   editRevision(report:Report):void {
-    this.revisionFor=report;this.reportDraft={ticket_id:report.ticket_id,work_done:report.work_done,completion_status:report.completion_status,work_measure:report.work_measure,work_measure_unit:report.work_measure_unit,lines:report.lines.map(l=>({item_id:l.item_id,quantity:l.quantity}))};this.reportQuestions=[];this.reportResourceFields={};
+    this.revisionFor=report;this.reportDraft={ticket_id:report.ticket_id,work_date:report.work_date||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date()),work_done:report.work_done,completion_status:report.completion_status,work_measure:report.work_measure,work_measure_unit:report.work_measure_unit,lines:report.lines.map(l=>({id:l.id,item_id:l.item_id,quantity:l.quantity,rate_id:l.rate_id,rate_mode:l.rate_mode,actual_rate:l.locked_price,rate_note:l.rate_note}))};this.reportQuestions=[];this.reportResourceFields={};
     this.translatedRevision='';this.verifiedDraft=false;this.go('reports');
     window.scrollTo({top:0,behavior:'smooth'});
   }
@@ -279,7 +314,8 @@ export class AppComponent implements OnInit,OnDestroy {
   async saveLabels():Promise<void>{await this.task(()=>this.api.call('saveMenuLabels',this.labels),'Menu names updated for all users.');}
   async testJira():Promise<void>{this.busy=true;try{const result=await this.api.call<unknown>('testJiraConnection');this.inform('Jira connection verified. '+JSON.stringify(result),'success');}catch(e){this.inform(this.errorText(e),'error');}finally{this.busy=false;}}
   async loadJiraDesks():Promise<void>{if(!this.data?.jiraReady)return;this.busy=true;
-    try{this.jiraDesks=await this.api.call<typeof this.jiraDesks>('listJiraServiceDesks');}
+    try{this.jiraDesks=(await this.api.call<typeof this.jiraDesks>('listJiraServiceDesks')).filter(d=>d.projectKey.toUpperCase()==='CIVIL'||/civil/i.test(d.name));
+      const civil=this.jiraDesks[0];if(civil&&civil.id!==this.selectedDesk){this.selectedDesk=civil.id;void this.chooseDesk();}}
     catch(e){this.inform(this.errorText(e),'error');}
     finally{this.busy=false;}
   }
@@ -330,14 +366,14 @@ export class AppComponent implements OnInit,OnDestroy {
     void this.analyzeVoice();
   }
   reportField(label:string):string{
-    const exact=this.reportDraft.lines.find(l=>this.itemName(l.item_id).toLowerCase()===label.toLowerCase());
-    if(exact)return String(exact.quantity)+' '+this.itemUnit(exact.item_id);
+    const lines=this.reportDraft.lines.filter(l=>this.itemName(l.item_id).toLowerCase()===label.toLowerCase());
+    if(lines.length)return String(lines.reduce((total,l)=>total+Number(l.quantity),0))+' '+this.itemUnit(lines[0].item_id);
     return this.reportResourceFields[label]||'Not Used';
   }
   get dailyReportPreview():string{
     const t=this.data?.tickets.find(t=>t.id===this.reportDraft.ticket_id);
     const sections:[string,string[]][]=[['Labours',['Masons','Helpers','FC','Etc']],['Materials Used',['Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles','Other Materials']],['Equipment Used',['Tractor','Crane','JCB','Scaffolding','Other Equipment']]];
-    const date=new Date().toLocaleDateString('en-GB',{timeZone:'Asia/Kolkata'});
+    const date=this.reportDraft.work_date?this.reportDraft.work_date.split('-').reverse().join('/') : new Date().toLocaleDateString('en-GB',{timeZone:'Asia/Kolkata'});
     const lines=['DAILY SITE REPORT','Ticket No: '+(t?.jira_ticket_no||'Not Applicable'),'Work Date: '+date,
       'Project Location: '+(t?.location||'Not Applicable'),'Supervisor name: '+(this.data?.user.name||'Not Applicable'),
       'Work Done:',this.reportDraft.work_done||'Not Applicable',''];
@@ -347,15 +383,37 @@ export class AppComponent implements OnInit,OnDestroy {
     return lines.join('\n');
   }
   toggleBell():void {this.bellOpen=!this.bellOpen;}
-  async selectPeer(id:string):Promise<void>{this.selectedPeerId=id;await this.markConversationRead();}
+  async selectPeer(id:string):Promise<void>{this.selectedPeerId=id;await this.markConversationRead();void this.refreshChats();}
   private async markConversationRead():Promise<void>{
-    if(!this.selectedPeerId)return;
-    if(!this.data?.messages.some(m=>m.sender_id===this.selectedPeerId&&m.recipient_id===this.data?.user.id&&!m.read_at))return;
-    try{await this.api.call('markDirectMessagesRead',this.selectedPeerId);await this.refreshLive();}catch(_){/* Can try again later. */}
+    if(!this.selectedPeerId||!this.data||this.section!=='messages'||this.readInFlight)return;
+    const peerId=this.selectedPeerId,me=this.data.user.id,stamp=new Date().toISOString();
+    const hasUnread=this.data.messages.some(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at);
+    if(!hasUnread)return;
+    // Show the correct unread count as soon as the conversation is opened.
+    const seen=new Set(this.data.messages.filter(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at).map(m=>m.id));
+    this.data={...this.data,messages:this.data.messages.map(m=>seen.has(m.id)?{...m,read_at:stamp}:m),notifications:this.data.notifications.map(n=>n.type==='direct_message'&&seen.has(n.target_id||'')?{...n,read_at:stamp}:n)};
+    this.readInFlight=true;
+    try{await this.api.call('markDirectMessagesRead',peerId);}
+    catch(_){await this.refreshChats();}
+    finally{this.readInFlight=false;}
   }
-  async sendMessage():Promise<void>{if(!this.selectedPeerId||!this.newMessage.trim())return;
-    const body=this.newMessage.trim();const ok=await this.task(()=>this.api.call('sendDirectMessage',this.selectedPeerId,body),'Message sent.');
-    if(ok)this.newMessage='';
+  async sendMessage():Promise<void>{
+    if(this.sendingMessage||!this.data||!this.selectedPeerId||!this.newMessage.trim())return;
+    const body=this.newMessage.trim(),to=this.selectedPeerId,id='pending-'+Date.now();
+    this.newMessage='';this.sendingMessage=true;
+    const pending:DirectMessage={id,sender_id:this.data.user.id,recipient_id:to,body,created_at:new Date().toISOString(),read_at:'',pending:true};
+    this.data={...this.data,messages:[...this.data.messages,pending]};
+    try{const saved=await this.api.call<DirectMessage>('sendDirectMessage',to,body);
+      if(this.data)this.data={...this.data,messages:this.data.messages.map(m=>m.id===id?saved:m)};
+      void this.refreshChats();
+    }catch(e){if(this.data)this.data={...this.data,messages:this.data.messages.filter(m=>m.id!==id)};
+      this.newMessage=body;this.inform('Message not sent: '+this.errorText(e),'error');}
+    finally{this.sendingMessage=false;}
+  }
+  async addRate():Promise<void>{
+    if(!this.newRateItemId||this.newRatePrice===null||Number(this.newRatePrice)<0||!this.newRateDate){this.inform('Select an item, date and non-negative rate.','error');return;}
+    const ok=await this.task(()=>this.api.call('addItemRate',this.newRateItemId,this.newRatePrice,this.newRateDate,this.newRateSource,this.newRateNote),'Dated rate recorded; earlier rates remain unchanged.');
+    if(ok){this.newRatePrice=null;this.newRateNote='';}
   }
   async saveProfile():Promise<void>{
     if(String(this.profileDraft.email||'').toLowerCase()!==String(this.data?.user.email||'').toLowerCase()){
@@ -397,10 +455,10 @@ export class AppComponent implements OnInit,OnDestroy {
   }
   ratePrevious(itemId:string):number|string {
     const rates=(this.data?.itemRates||[]).filter(r=>r.item_id===itemId);
-    return rates.length?rates[0].old_rate:'—';
+    const past=rates.filter(r=>String(r.effective_date||r.changed_at).slice(0,10)<=this.todayWorkDate).sort((a,b)=>String(b.effective_date||b.changed_at).localeCompare(String(a.effective_date||a.changed_at)));return past.length>1?Number(past[1].new_rate):past.length?past[0].old_rate:'—';
   }
 
-  countForSupervisor(id:string):number{return (this.data?.tickets||[]).filter(t=>t.assigned_supervisor_id===id).length;}
+  countForSupervisor(id:string):number{return this.cspTickets.filter(t=>t.assigned_supervisor_id===id&&(this.jiraAssignmentGroup==='all'||t.jira_assignment_group===this.jiraAssignmentGroup)).length;}
   unreadFrom(id:string):boolean{return !!this.data?.messages.some(m=>m.sender_id===id&&m.recipient_id===this.data?.user.id&&!m.read_at);}
   fmtTime(value:string):string{const d=new Date(value);return Number.isNaN(d.valueOf())?value:new Intl.DateTimeFormat(this.lang,{dateStyle:'short',timeStyle:'short'}).format(d);}
   async copyDailyReport():Promise<void>{

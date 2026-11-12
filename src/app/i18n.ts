@@ -35,14 +35,14 @@ const translations: Record<Lang,Partial<typeof en>> = {
 export type TextKey = keyof typeof en;
 export function tr(lang:Lang,key:TextKey):string {return (translations[lang] as Record<string,string>)[key]||en[key];}
 export const NAV: {section:Section;icon:string;roles:('admin'|'lead'|'supervisor')[]}[] = [
- {section:'overview',icon:'◫',roles:['admin','lead','supervisor']},
- {section:'tickets',icon:'▤',roles:['admin','lead','supervisor']},
- {section:'reports',icon:'▤',roles:['admin','lead','supervisor']},
- {section:'review',icon:'✓',roles:['lead']},
- {section:'team',icon:'♙',roles:['admin']},
- {section:'inventory',icon:'▦',roles:['admin','lead']},
- {section:'jira',icon:'⌘',roles:['admin']},
- {section:'workbook',icon:'▥',roles:['admin']},
- {section:'messages',icon:'✉',roles:['admin','lead','supervisor']},
- {section:'settings',icon:'⚙',roles:['admin','lead','supervisor']}
+ {section:'overview',icon:'🏠',roles:['admin','lead','supervisor']},
+ {section:'tickets',icon:'🎫',roles:['admin','lead','supervisor']},
+ {section:'reports',icon:'📝',roles:['admin','lead','supervisor']},
+ {section:'review',icon:'✅',roles:['lead']},
+ {section:'team',icon:'👥',roles:['admin']},
+ {section:'inventory',icon:'🧱',roles:['admin','lead']},
+ {section:'jira',icon:'🗂️',roles:['admin']},
+ {section:'workbook',icon:'📊',roles:['admin']},
+ {section:'messages',icon:'💬',roles:['admin','lead','supervisor']},
+ {section:'settings',icon:'⚙️',roles:['admin','lead','supervisor']}
 ];

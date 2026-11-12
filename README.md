@@ -1,3 +1,29 @@
+# CSP SitePulse V3 — source update (November 11, 2026)
+
+The installation and upgrade sequence is provided in the chat, **not as an additional installation guide**.
+
+## Changes in V3
+
+- Messages: unread-only badge, mark-as-read on opening a conversation, optimistic sending, and lightweight 3-second chat polling while the Messages page is visible. Actual delivery depends on the network, Apps Script, and FCM. No guaranteed sub-second delivery.
+- Rates: append-only dated price register (including future prices), vendor/source notes, actual paid price with receipt reference, multiple price batches for one resource, and immutable price snapshots in `Report_Line_Items`. Rates become effective on their stated date; future prices cannot be used for an earlier work date.
+- CIVIL Jira desk is preselected; tickets are matched to the twelve approved supervisors using Jira's actual assignment fields or native Assignee with conservative known name aliases. The Jira location is read from the real `IESM_Location` field, never from the summary. When Jira metadata is unavailable a blank field stays blank.
+- Compact sidebar with recognizable icons, title tooltips and one-line Jira table text (open ticket for full description).
+- Voice reports: available-model discovery on model HTTP 404, an explicitly labeled conservative English-number fallback, resource lines saved in Google Sheets, and manual rate selection. Review all generated quantities before approval.
+
+## Required backend procedure
+
+Back up existing backend and spreadsheets; replace `Code.gs` in the original Apps Script project, run `setupProject`, then run `seedLegacyCspItems` (admin-triggered within the app, optional to add missing standard resources), and **edit the existing Web app deployment to New version**. Do not create a new spreadsheet or overwrite Script Properties. Run the private staff setup only if it has not yet been completed; never put staff roster or secret properties in GitHub.
+
+## Required frontend procedure
+
+Copy this project over the existing local GitHub repository (not as a nested folder). Restore your saved `src/app/environment.ts` containing your live Worker and public Firebase configuration. Commit and push to main through GitHub Desktop, then check GitHub Actions Build and Deploy. Deploy Cloudflare Worker only if its code has changed (not required by V3). This ZIP deliberately contains no private staff roster or separate upgrade instructions.
+
+## Verification limits
+
+Node JavaScript syntax, TypeScript syntax, API allowlist, and backend pure-function behavior tests passed. The local npm install timed out and a production Angular build was **not** completed. Live Jira, FCM, Gemini, Cloudflare and real two-device messaging require testing in your accounts. For exact Jira fields, auto-discovery uses `/rest/api/2/field`; if your organization hides field metadata, set the appropriate `JIRA_*_FIELD` script properties to exact `customfield_12345` IDs.
+
+---
+
 # CSP SitePulse
 
 A compact, role-aware civil field-operations web application based on the supplied `Code.gs`, CSP requirements, and Isha logo. The application is **source code, not a hosted live service**. It cannot send real email, query Jira, use Gemini, or deliver push until the owner deploys/configures the external services.
