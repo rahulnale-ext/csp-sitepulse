@@ -1,2 +1,10 @@
 :root{color-scheme:light;font-family:Inter,"Noto Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-synthesis:none;text-rendering:optimizeLegibility;-webkit-font-smoothing:antialiased;background:#f7f7f2;color:#26352e}
 *{box-sizing:border-box}html,body{margin:0;min-width:320px;min-height:100%}button,input,select,textarea{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.55}input,select,textarea{border:1px solid #dce3db;border-radius:8px;background:#fff;color:#26352e;min-height:36px;padding:7px 10px;outline:none}textarea{resize:vertical}input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid #dd9139;outline-offset:2px}a{color:inherit;text-decoration:none}
+
+/* SitePulse V5: compact priority planning and manual report editor */
+.priority-panel{padding:14px;margin-bottom:12px}.priority-panel select{max-width:330px}.priority-list{max-height:340px;overflow:auto;margin-top:10px}
+.priority-entry{display:grid;grid-template-columns:70px 112px minmax(0,1fr);gap:10px;align-items:center;padding:7px 3px;border-bottom:1px solid #e7ebe7;font-size:12px}
+.priority-entry input{width:66px;min-width:0;padding:6px}.priority-entry span{white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.quantity-row{display:grid;grid-template-columns:minmax(170px,2fr) minmax(85px,1fr) minmax(95px,1fr) auto;gap:8px;margin:8px 0}
+.quantity-row input{min-width:0}.manual-report-editor{width:100%;min-height:340px;resize:vertical;font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;padding:14px;border:1px solid #d4dfd7;border-radius:8px;background:#fafbf9}
+@media(max-width:740px){.quantity-row{grid-template-columns:1fr 1fr}.priority-entry{grid-template-columns:64px 88px minmax(0,1fr)}}

@@ -3,12 +3,9 @@ import {CommonModule} from '@angular/common';
 import {FormsModule} from '@angular/forms';
 import {ApiService} from './api.service';
 import {PushService} from './push.service';
-import {FirestoreChatService} from './firestore-chat.service';
 import {NAV,LANGUAGES,tr,TextKey} from './i18n';
-import type {Bootstrap, DirectMessage, LiveUpdates, JiraDetail, Lang, Notice, Report, ReportDraft, ReportLine, Resource, Role, Section, Staff, Ticket, Workbook} from './models';
+import type {Bootstrap, LiveUpdates, JiraDetail, Lang, Notice, Report, ReportDraft, ReportLine, Resource, Role, Section, Staff, Ticket, Workbook} from './models';
 import {environment} from './environment';
-
-type SpeechEngine = {lang:string;continuous:boolean;interimResults:boolean;onresult:((event:{results:ArrayLike<{0:{transcript:string};isFinal:boolean}>;resultIndex:number})=>void)|null;onerror:((e:{error:string})=>void)|null;onend:(()=>void)|null;start:()=>void;stop:()=>void};
 
 @Component({selector:'csp-root',standalone:true,imports:[CommonModule,FormsModule],templateUrl:'./app.component.html',styleUrl:'./app.component.css'})
 export class AppComponent implements OnInit,OnDestroy {
@@ -29,9 +26,9 @@ export class AppComponent implements OnInit,OnDestroy {
   email='';code='';
   message=''; messageKind:'success'|'error'|'info'='info';
   search='';ticketStatus='all';supervisorFilter='all';locationFilter='all';ticketDateFilter='';resourceFilter='all';
-  ticketGroupFilter='all';jiraAssignmentGroup='all'; bellOpen=false; selectedPeerId='';newMessage=''; sendingMessage=false; private readInFlight=false;
+  ticketGroupFilter='all';jiraAssignmentGroup='all'; bellOpen=false; 
   isLiveSyncing=false; private liveTimer:ReturnType<typeof setInterval>|null=null;
-  reportPreview=''; reportQuestions:string[]=[];followUpAnswer=''; reportResourceFields:Record<string,string>={};
+  reportPreview=''; reportResourceFields:Record<string,string>={};
   selectedTicket:Ticket|null=null;
   jiraDetail:JiraDetail|null=null;
   jiraProject='CIVIL';
@@ -44,10 +41,10 @@ export class AppComponent implements OnInit,OnDestroy {
   reportFilter='all';
   reportDraft:ReportDraft=this.freshReport();
   selectedItemId='';newItemQty=1;
-  voiceTranscript='';recognizing=false;
-  recordedAudio:Blob|null=null;private mediaRecorder:MediaRecorder|null=null;
-  private mediaStream:MediaStream|null=null;private recordingTimer:ReturnType<typeof setTimeout>|null=null;
-  private recognition:SpeechEngine|null=null;
+  workQuantities:Array<{description:string;quantity:number;unit:string}>=[];
+  reportTextEditor='';reportTextApplied=false;
+  prioritySupervisorId='';priorityEdits:Record<string,number>={};
+  externalWhatsAppPhone='';
   verifiedDraft=false;
   revisionFor:Report|null=null;
   translatedRevision='';
@@ -68,10 +65,10 @@ export class AppComponent implements OnInit,OnDestroy {
   labels:Partial<Record<Section,string>>={};
   private lastAutoJiraSync=0;
 
-  constructor(public readonly api:ApiService,private readonly push:PushService,public readonly chat:FirestoreChatService) {}
+  constructor(public readonly api:ApiService,private readonly push:PushService) {}
   ngOnInit():void {
     if (this.api.hasSession) void this.loadBootstrap(true);
-    this.liveTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.data&&this.section!=='messages'&&!this.busy&&!this.isBooting)void this.refreshLive();},8000);
+    this.liveTimer=setInterval(()=>{if(document.visibilityState==='visible'&&this.data&&!this.busy&&!this.isBooting)void this.refreshLive();},8000);
     window.addEventListener('focus',this.focusHandler);
     if ('serviceWorker' in navigator) {
       const register=()=>navigator.serviceWorker.register('firebase-messaging-sw.js',{scope:'./'}).catch(()=>{});
@@ -79,7 +76,7 @@ export class AppComponent implements OnInit,OnDestroy {
       else window.addEventListener('load',()=>{void register();},{once:true});
     }
   }
-  ngOnDestroy():void { this.stopVoice();if(this.liveTimer)clearInterval(this.liveTimer);void this.chat.disconnect();window.removeEventListener('focus',this.focusHandler); }
+  ngOnDestroy():void { if(this.liveTimer)clearInterval(this.liveTimer);window.removeEventListener('focus',this.focusHandler); }
   private focusHandler=()=>{if(this.data)void this.refreshLive();};
   private readLang():Lang { const saved=localStorage.getItem('csp.lang');return (LANGUAGES.some(x=>x.code===saved)?saved:'en-IN') as Lang; }
   setLang(next:Lang):void {this.lang=next;localStorage.setItem('csp.lang',next);document.documentElement.lang=next.slice(0,2);}
@@ -89,7 +86,6 @@ export class AppComponent implements OnInit,OnDestroy {
   itemUnit(id:string):string{return this.data?.items.find(i=>i.id===id)?.rate_unit||'unit';}
   get role():Role {return this.data?.user.role||'supervisor';}
   get visibleNav(){return this.nav.filter(n=>n.roles.includes(this.role));}
-  get unreadMessages():number{return (this.data?.messages||[]).filter(m=>m.recipient_id===this.data?.user.id&&!m.read_at).length;}
   get unread():number{return this.data?.notifications.filter(n=>!n.read_at).length||0;}
   readonly supervisorNames=['Raju venkatesh','Murugesh Subbappa','Ayush','Guna','Balakrishanan','Kalai','Vasant','Prakash','Thangapandi','SURESH','KARTIKEYAN','KARTIK'];
   private normalizeName(v:unknown):string{return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
@@ -97,7 +93,7 @@ export class AppComponent implements OnInit,OnDestroy {
     if(t.project_key&&String(t.project_key).toUpperCase()!=='CIVIL')return false;
     const people=[t.jira_assignee,t.engineer_name];
     try {const named=JSON.parse(String(t.jira_assignees||'[]')); if(Array.isArray(named))people.push(...named.map((x:{name?:string})=>x.name||''));}catch(_){}
-    const aliases:Record<string,string>={vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
+    const aliases:Record<string,string>={raju:'rajuvenkatesh',balakrishnan:'balakrishanan',kalairasan:'kalai',kalaiarasan:'kalai',shiva:'siva',vignesh:'vighnesh',vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
     const allowed=new Set(this.supervisorNames.map(x=>this.normalizeName(x)));
     return people.some(x=>{const n=this.normalizeName(x);return allowed.has(aliases[n]||n);});
   }
@@ -122,22 +118,20 @@ export class AppComponent implements OnInit,OnDestroy {
         (!this.ticketDateFilter||String(t.created||'').slice(0,10)===this.ticketDateFilter) &&
         (this.ticketGroupFilter==='all'||this.ticketGroupFilter==='new'&&/new|ready to assign/i.test(t.status)||this.ticketGroupFilter==='r&d'&&/r&d|research/i.test(t.status)||this.ticketGroupFilter==='design'&&/design/i.test(t.status)||this.ticketGroupFilter==='estimation'&&/estimat/i.test(t.status)||this.ticketGroupFilter==='execution'&&/execution|in progress|site inspection/i.test(t.status)) &&
         (!q||[t.jira_ticket_no,t.summary,t.location,t.department,t.engineer_name,t.status].some(v=>String(v||'').toLowerCase().includes(q)));
-    });
+    }).sort((a,b)=>Number(a.priority_sequence||9999)-Number(b.priority_sequence||9999));
   }
   get matchingReports():Report[] {return (this.data?.reports||[]).filter(r=>this.reportFilter==='all'||r.status===this.reportFilter);}
   get pendingReports():Report[] {return (this.data?.reports||[]).filter(r=>r.status==='pending');}
   get eligibleSupervisors():Staff[]{const list=(this.data?.users||[]).filter(u=>u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true'));const me=this.data?.user;return me&&(me.role==='supervisor'||(me.role==='lead'&&String(me.can_supervise)==='true'))&&!list.some(p=>p.id===me.id)?[me,...list]:list;}
   get leads():Staff[]{return (this.data?.users||[]).filter(u=>u.role==='lead');}
   get adminUsers():Staff[]{return this.data?.users||[];}
-  get visibleMessages():DirectMessage[] {return (this.data?.messages||[]).filter(m=>(m.sender_id===this.selectedPeerId&&m.recipient_id===this.data?.user.id)||(m.recipient_id===this.selectedPeerId&&m.sender_id===this.data?.user.id));}
-  get currentPeerName():string {return this.data?.contacts.find(c=>c.id===this.selectedPeerId)?.name||'Select a person';}
   get rateHistory(){return (this.data?.itemRates||[]).filter(r=>this.resourceFilter==='all'||r.category===this.resourceFilter).sort((a,b)=>String(b.effective_date||b.changed_at).localeCompare(String(a.effective_date||a.changed_at)));}
   rateStatus(r:import('./models').RateChange):string{const day=String(r.effective_date||r.changed_at).slice(0,10);if(day>this.todayWorkDate)return 'Future';const newest=this.rateOptions(r.item_id)[0];return newest?.id===r.id?'Current':'Previous';}
   rateOptions(itemId:string):import('./models').RateChange[]{const today=this.reportDraft.work_date||this.todayWorkDate;return (this.data?.itemRates||[]).filter(r=>r.item_id===itemId&&String(r.effective_date||r.changed_at||'').slice(0,10)<=today).sort((a,b)=>String(b.effective_date||b.changed_at).localeCompare(String(a.effective_date||a.changed_at)));}
   rateName(r:import('./models').RateChange):string{return this.fmtMoney(r.new_rate)+' / '+(r.rate_unit||'unit')+' • '+(r.effective_date||String(r.changed_at).slice(0,10))+(r.source?' • '+r.source:'');}
   rateForLine(line:ReportLine):string{if(line.rate_id){const rate=this.data?.itemRates.find(x=>x.id===line.rate_id);if(rate)return this.rateName(rate);}return line.rate_mode==='actual'?'Actual paid: '+this.fmtMoney(line.actual_rate||0):'Auto (current approved rate)';}
   get resourceList():Resource[] {return (this.data?.items||[]).filter(i=>this.resourceFilter==='all'||i.type===this.resourceFilter);}
-  get myOpenTickets():Ticket[] {return (this.data?.tickets||[]).filter(t=>t.assigned_supervisor_id===this.data?.user.id&&t.assignment_status!=='returned'&&t.assignment_status!=='completed'&&!/closed|resolved|done|cancelled|completed/i.test(t.status));}
+  get myOpenTickets():Ticket[] {return (this.data?.tickets||[]).filter(t=>t.assigned_supervisor_id===this.data?.user.id&&t.assignment_status!=='returned'&&t.assignment_status!=='completed'&&!/closed|resolved|done|cancelled|completed/i.test(t.status)).sort((a,b)=>Number(a.priority_sequence||9999)-Number(b.priority_sequence||9999));}
   get assignedCount():number {return (this.data?.tickets||[]).filter(t=>!!t.assigned_supervisor_id).length;}
   get approvedCount():number{return (this.data?.reports||[]).filter(r=>r.status==='approved').length;}
   get completionPercent():number {const reports=this.data?.reports||[];return reports.length?Math.round(this.approvedCount*100/reports.length):0;}
@@ -169,7 +163,7 @@ export class AppComponent implements OnInit,OnDestroy {
     finally{this.isLoginBusy=false;}
   }
   async logout():Promise<void>{
-    await this.chat.disconnect();
+    
     try {await this.api.call('logoutSession');} catch(_){}
     this.api.clearSession();this.data=null;this.section='overview';this.loginStep='email';this.isMobileMenuOpen=false;this.bellOpen=false;this.profileDraft={};this.inform('Signed out.','info');
   }
@@ -177,12 +171,10 @@ export class AppComponent implements OnInit,OnDestroy {
     if(this.isBooting)return;this.isBooting=true;
     try {const data=await this.api.call<Bootstrap>('getBootstrap');
       if(!data.authorized){this.api.clearSession();this.data=null;throw new Error(data.message||'Your session has expired.');}
-      this.data={...data,messages:this.chat.messages};this.labels={...data.menuLabels};this.profileDraft={...data.user};
-      void this.connectFirestoreChat(data.user.id);
-      if(!this.selectedPeerId&&data.contacts.length)this.selectedPeerId=data.contacts[0].id;
+      this.data=data;this.labels={...data.menuLabels};this.profileDraft={...data.user};
       if(!this.visibleNav.some(n=>n.section===this.section))this.section='overview';
       if(!initial)this.inform('Your workspace is up to date.','success');
-    }catch(e){if(initial){this.api.clearSession();void this.chat.disconnect();}this.inform(this.errorText(e),'error');}
+    }catch(e){if(initial){this.api.clearSession();}this.inform(this.errorText(e),'error');}
     finally{this.isBooting=false;}
   }
   private errorText(e:unknown):string{return e instanceof Error?e.message:'The request could not be completed.';}
@@ -190,22 +182,8 @@ export class AppComponent implements OnInit,OnDestroy {
     if(this.isLiveSyncing||!this.api.hasSession||!this.data)return;this.isLiveSyncing=true;
     try{const fresh=await this.api.call<LiveUpdates>('getLiveUpdates');
       if(this.data){this.data={...this.data,tickets:fresh.tickets,reports:fresh.reports,notifications:fresh.notifications,items:fresh.items,contacts:fresh.contacts,itemRates:fresh.itemRates};}
-      if(this.section==='messages')void this.markConversationRead();
     }catch(_){/* Do not display transient polling errors; explicit Refresh reports them. */}
     finally{this.isLiveSyncing=false;}
-  }
-  private async connectFirestoreChat(uid:string):Promise<void>{
-    try {
-      await this.chat.connect(uid,messages=>{
-        if(!this.data||this.data.user.id!==uid)return;
-        this.data={...this.data,messages};
-        if(this.section==='messages' && this.selectedPeerId)void this.markConversationRead();
-      },error=>this.inform(error,'error'));
-    }catch(e){this.inform('Firestore messaging unavailable: '+this.errorText(e),'error');}
-  }
-  async refreshChats():Promise<void>{
-    // Firestore onSnapshot keeps the full conversation state up to date without polling.
-    if(this.section==='messages')await this.markConversationRead();
   }
   async task(operation:()=>Promise<unknown>,success='Updated successfully.'):Promise<boolean>{
     if(this.busy)return false;this.busy=true;
@@ -213,13 +191,12 @@ export class AppComponent implements OnInit,OnDestroy {
     catch(e){this.inform(this.errorText(e),'error');return false;}
     finally{this.busy=false;}
   }
-  private async loadBootstrapQuietly():Promise<void> {const data=await this.api.call<Bootstrap>('getBootstrap');if(!data.authorized)throw new Error(data.message||'Session expired.');this.data={...data,messages:this.chat.messages};this.labels={...data.menuLabels};if(!this.profileDraft.id)this.profileDraft={...data.user};}
+  private async loadBootstrapQuietly():Promise<void> {const data=await this.api.call<Bootstrap>('getBootstrap');if(!data.authorized)throw new Error(data.message||'Session expired.');this.data=data;this.labels={...data.menuLabels};if(!this.profileDraft.id)this.profileDraft={...data.user};}
   go(section:Section):void {
     if(!this.visibleNav.some(n=>n.section===section)){this.inform(this.t('noPermission'),'error');return;}
     this.section=section;this.isMobileMenuOpen=false;this.search='';
     if(section==='workbook'&&!this.workbook)void this.loadWorkbook();
     if(section==='jira'&&!this.jiraDesks.length&&this.data?.jiraReady)void this.loadJiraDesks();
-    if(section==='messages'&&this.selectedPeerId){void this.markConversationRead();void this.refreshChats();}
   }
   toggleSidebar():void {this.isCompact=!this.isCompact;localStorage.setItem('csp.sidebar',String(this.isCompact));}
   async onSupervisorChange():Promise<void>{
@@ -253,96 +230,22 @@ export class AppComponent implements OnInit,OnDestroy {
     if(this.customRate!==null&&(!this.customRateNote.trim()||this.customRate<0)){this.inform('For an actual purchase rate, enter a non-negative price and receipt or vendor reference.','error');return;}
     const existing=this.reportDraft.lines.find(l=>l.item_id===this.selectedItemId&&l.rate_id===(this.selectedRateId||'')&&l.rate_mode===(this.customRate!==null?'actual':'catalog')&&(this.customRate===null||l.actual_rate===this.customRate));
     if(existing)existing.quantity+=Number(this.newItemQty); else this.reportDraft.lines.push({item_id:this.selectedItemId,quantity:Number(this.newItemQty),rate_id:this.selectedRateId||'',rate_mode:this.customRate!==null?'actual':'catalog',actual_rate:this.customRate===null?undefined:Number(this.customRate),rate_note:this.customRateNote});
-    this.selectedItemId='';this.selectedRateId='';this.customRate=null;this.customRateNote='';this.newItemQty=1;this.verifiedDraft=false;
+    this.selectedItemId='';this.selectedRateId='';this.customRate=null;this.customRateNote='';this.newItemQty=1;this.reportTextApplied=false;this.verifiedDraft=false;
   }
   selectResource(itemId:string):void{this.selectedItemId=itemId;this.selectedRateId='';this.customRate=null;this.customRateNote='';}
-  removeLine(index:number):void {this.reportDraft.lines.splice(index,1);this.verifiedDraft=false;}
-  startVoice():void {
-    // Audio-first mode: send a short original recording to Gemini. This improves
-    // local accents and code-switched construction vocabulary over browser-only STT.
-    this.recordedAudio=null;this.verifiedDraft=false;
-    if(typeof MediaRecorder!=='undefined'&&!!navigator.mediaDevices){void this.captureVoiceAudio();return;}
-    this.startBrowserVoice();
-  }
-  private async captureVoiceAudio():Promise<void>{
-    try {
-      const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
-      const formats=['audio/webm;codecs=opus','audio/mp4','audio/webm','audio/ogg;codecs=opus'];
-      const mime=formats.find(f=>MediaRecorder.isTypeSupported(f));
-      if(!mime){stream.getTracks().forEach(t=>t.stop());this.startBrowserVoice();return;}
-      const rec=new MediaRecorder(stream,{mimeType:mime,audioBitsPerSecond:24000});
-      const chunks:Blob[]=[];this.mediaRecorder=rec;this.mediaStream=stream;
-      rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
-      rec.onstop=()=>{
-        stream.getTracks().forEach(t=>t.stop());this.mediaStream=null;this.mediaRecorder=null;
-        if(this.recordingTimer){clearTimeout(this.recordingTimer);this.recordingTimer=null;}
-        this.recognizing=false;
-        const audio=new Blob(chunks,{type:rec.mimeType||mime});
-        if(audio.size>700000){this.recordedAudio=null;this.inform('Recording is too large. Speak for a shorter time (up to 45 seconds).','error');return;}
-        if(audio.size<100){this.recordedAudio=null;this.inform('No usable audio was recorded. Try speaking again.','error');return;}
-        this.recordedAudio=audio;
-        this.inform('Recording ready. Click Generate report to interpret your original speech in '+this.currentLanguageLabel+'.','info');
-      };
-      rec.onerror=()=>{this.recognizing=false;this.inform('Microphone recording failed. Type your update or retry.','error');};
-      rec.start(1000);this.recognizing=true;
-      this.recordingTimer=setTimeout(()=>this.stopVoice(),45000);
-    }catch(e){this.inform('Unable to access microphone. Check browser permission or type the update. '+this.errorText(e),'error');}
-  }
-  private startBrowserVoice():void {
-    const ctor=(window as unknown as {SpeechRecognition?:new()=>SpeechEngine;webkitSpeechRecognition?:new()=>SpeechEngine}).SpeechRecognition ||
-      (window as unknown as {webkitSpeechRecognition?:new()=>SpeechEngine}).webkitSpeechRecognition;
-    if(!ctor){this.inform('Speech recording is unsupported in this browser. Type your update in any supported language.','error');return;}
-    try{const rec=new ctor();rec.lang=this.lang;rec.continuous=true;rec.interimResults=false;
-      rec.onresult=e=>{let content='';for(let i=e.resultIndex;i<e.results.length;i++)if(e.results[i].isFinal)content+=e.results[i][0].transcript+' ';this.voiceTranscript=(this.voiceTranscript+' '+content).trim();};
-      rec.onerror=e=>{this.recognizing=false;this.inform('Voice capture: '+e.error,'error');};
-      rec.onend=()=>{this.recognizing=false;};this.recognition=rec;rec.start();this.recognizing=true;
-    }catch(e){this.inform(this.errorText(e),'error');}
-  }
-  stopVoice():void {
-    if(this.recordingTimer){clearTimeout(this.recordingTimer);this.recordingTimer=null;}
-    if(this.mediaRecorder&&this.mediaRecorder.state!=='inactive')this.mediaRecorder.stop();
-    else if(this.recognition){this.recognition.stop();this.recognition=null;this.recognizing=false;}
-  }
-  discardVoice():void {this.recordedAudio=null;this.verifiedDraft=false;}
-  private async blobBase64(blob:Blob):Promise<string>{
-    const bytes=new Uint8Array(await blob.arrayBuffer());let binary='';
-    for(let i=0;i<bytes.length;i+=8192){binary+=String.fromCharCode(...bytes.subarray(i,i+8192));}
-    return btoa(binary);
-  }
-  async analyzeVoice():Promise<void>{
-    if(this.recognizing){this.inform('Stop the recording before generating the report.','error');return;}
-    if(!this.voiceTranscript.trim()&&!this.recordedAudio){this.inform('Speak or type a transcript before generating the report.','error');return;}
-    if(!this.reportDraft.ticket_id){this.inform('Select your assigned Jira ticket first.','error');return;}
-    this.busy=true;
-    try{
-      type Interpretation={reportText:string;questions:string[];resources:Record<string,string>;work_done:string;
-        source_transcript?:string;source_language?:string;completion_status:string;work_measure:number;
-        work_measure_unit:string;lines:{item_id:string;quantity:number}[];mode?:string;warning?:string};
-      const parsed=this.recordedAudio
-        ?await this.api.call<Interpretation>('interpretWorkAudio',await this.blobBase64(this.recordedAudio),this.recordedAudio.type.split(';')[0],this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date)
-        :await this.api.call<Interpretation>('interpretWorkVoice',this.voiceTranscript,this.lang,this.reportDraft.ticket_id,this.reportDraft.work_date);
-      if(parsed.source_transcript) this.voiceTranscript=parsed.source_transcript;
-      this.reportDraft.work_done=parsed.work_done;
-      this.reportDraft.work_measure=parsed.work_measure;this.reportDraft.work_measure_unit=parsed.work_measure_unit;
-      this.reportDraft.completion_status=parsed.completion_status;this.reportDraft.lines=parsed.lines.map(l=>({...l,rate_id:'',rate_mode:'catalog'}));
-      this.reportQuestions=parsed.questions||[];this.reportResourceFields=parsed.resources||{};this.reportPreview=parsed.reportText;
-      this.recordedAudio=null;
-      this.verifiedDraft=false;
-      this.inform(parsed.warning|| (this.reportQuestions.length?'Please answer the important missing questions.':'English draft generated. Check every quantity.'),'info');
-    }catch(e){this.inform(this.errorText(e),'error');}
-    finally{this.busy=false;}
-  }
+  removeLine(index:number):void {this.reportDraft.lines.splice(index,1);this.reportTextApplied=false;this.verifiedDraft=false;}
   async submitDraft():Promise<void>{
+    if(!this.reportTextApplied){this.inform('Click Apply text changes before submitting.','error');return;}
     if(!this.verifiedDraft){this.inform('Verify the report and quantities before submitting.','error');return;}
-    if(!this.reportDraft.ticket_id||!this.reportDraft.work_done.trim()||this.reportQuestions.length||this.reportDraft.lines.some(l=>!Number.isFinite(Number(l.quantity))||Number(l.quantity)<=0)){
-      this.inform('Choose a ticket, answer any follow-up questions, and check the work description and quantities.','error');return;}
-    const draft={...this.reportDraft,source_transcript:this.voiceTranscript,source_language:this.lang,daily_report_text:this.dailyReportPreview,lines:this.reportDraft.lines.map(x=>({...x,quantity:Number(x.quantity)}))};
+    if(!this.reportDraft.ticket_id||!this.reportDraft.work_done.trim()||this.workQuantities.some(w=>!w.description.trim()||!w.unit.trim()||!(Number(w.quantity)>0))||this.reportDraft.lines.some(l=>!Number.isFinite(Number(l.quantity))||Number(l.quantity)<=0)){
+      this.inform('Choose a ticket and verify the work description and quantities.','error');return;}
+    const draft={...this.reportDraft,source_transcript:'',source_language:'',daily_report_text:this.reportTextEditor,work_quantities:this.workQuantities,lines:this.reportDraft.lines.map(x=>({...x,quantity:Number(x.quantity)}))};
     const success=await this.task(()=>this.revisionFor?this.api.call('reviseReport',this.revisionFor.id,draft):this.api.call('submitReport',draft),this.revisionFor?'Revision submitted.':'Report sent for approval.');
-    if(success){this.reportDraft=this.freshReport();this.voiceTranscript='';this.recordedAudio=null;this.reportPreview='';this.reportQuestions=[];this.revisionFor=null;this.verifiedDraft=false;this.go('reports');}
+    if(success){this.reportDraft=this.freshReport();this.reportTextEditor='';this.reportTextApplied=false;this.workQuantities=[];this.reportPreview='';this.revisionFor=null;this.verifiedDraft=false;this.go('reports');}
   }
   editRevision(report:Report):void {
-    this.revisionFor=report;this.reportDraft={ticket_id:report.ticket_id,work_date:report.work_date||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date()),work_done:report.work_done,completion_status:report.completion_status,work_measure:report.work_measure,work_measure_unit:report.work_measure_unit,lines:report.lines.map(l=>({id:l.id,item_id:l.item_id,quantity:l.quantity,rate_id:l.rate_id,rate_mode:l.rate_mode,actual_rate:l.locked_price,rate_note:l.rate_note}))};this.reportQuestions=[];this.reportResourceFields={};
-    this.voiceTranscript=report.source_transcript||'';this.recordedAudio=null;this.translatedRevision='';this.verifiedDraft=false;this.go('reports');
+    this.revisionFor=report;this.reportDraft={ticket_id:report.ticket_id,work_date:report.work_date||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata'}).format(new Date()),work_done:report.work_done,completion_status:report.completion_status,work_measure:report.work_measure,work_measure_unit:report.work_measure_unit,lines:report.lines.map(l=>({id:l.id,item_id:l.item_id,quantity:l.quantity,rate_id:l.rate_id,rate_mode:l.rate_mode,actual_rate:l.locked_price,rate_note:l.rate_note}))};this.reportResourceFields={};
+    this.workQuantities=JSON.parse(report.work_quantities_json||'[]');this.reportTextEditor=report.daily_report_text||'';this.reportTextApplied=true;this.translatedRevision='';this.verifiedDraft=false;this.go('reports');
     window.scrollTo({top:0,behavior:'smooth'});
   }
   async translateRevision():Promise<void>{if(!this.revisionFor?.revision_note)return;
@@ -368,6 +271,7 @@ export class AppComponent implements OnInit,OnDestroy {
   async saveItem():Promise<void>{const ok=await this.task(()=>this.api.call('saveMasterItem',this.editResource),'Resource saved.');if(ok)this.editItem();}
   async removeItem(item:Resource):Promise<void>{if(!window.confirm(`Remove ${item.name}?`))return;await this.task(()=>this.api.call('deleteMasterItem',item.id),'Resource removed.');}
   async seedItems():Promise<void>{await this.task(()=>this.api.call('seedLegacyCspItems'),'Default resource names added where missing.');}
+  async applyJiraStaffNames():Promise<void>{if(!window.confirm('Rename only the 6 explicitly mapped staff profiles? Email addresses and IDs will stay unchanged.'))return;await this.task(()=>this.api.call('applyJiraStaffNames'),'Jira display names applied to the matched staff.');}
   async seedRoster():Promise<void>{await this.task(()=>this.api.call('syncCspRoster'),'Supervisor roster updated. Verify emails and reporting leads.');}
   async markRead(notice:Notice):Promise<void>{if(notice.read_at)return;await this.task(()=>this.api.call('markNotificationRead',notice.id),'');}
   async enablePush():Promise<void>{this.busy=true;try{await this.push.enable((_title,_body)=>{void this.refreshLive();});this.inform('This device is ready to receive notifications.','success');}catch(e){this.inform(this.errorText(e),'error');}finally{this.busy=false;}}
@@ -420,16 +324,10 @@ export class AppComponent implements OnInit,OnDestroy {
     const totalColumns=this.workbook.totalColumns;const heading=this.newColName.trim();
     const ok=await this.task(()=>this.api.call('insertReportingWorkbookColumn',this.selectedTab,totalColumns,heading),'Column added.');if(ok){this.newColName='';await this.loadWorkbook();}
   }
-  answerFollowUp():void {
-    if(!this.followUpAnswer.trim())return;
-    this.voiceTranscript+='\nFollow-up answer: '+this.followUpAnswer.trim();
-    this.followUpAnswer='';this.reportQuestions=[];this.reportPreview='';this.verifiedDraft=false;
-    void this.analyzeVoice();
-  }
   reportField(label:string):string{
     const lines=this.reportDraft.lines.filter(l=>this.itemName(l.item_id).toLowerCase()===label.toLowerCase());
     if(lines.length)return String(lines.reduce((total,l)=>total+Number(l.quantity),0))+' '+this.itemUnit(lines[0].item_id);
-    return this.reportResourceFields[label]||'Not Used';
+    return 'Not Used';
   }
   get dailyReportPreview():string{
     const t=this.data?.tickets.find(t=>t.id===this.reportDraft.ticket_id);
@@ -438,61 +336,76 @@ export class AppComponent implements OnInit,OnDestroy {
     const lines=['DAILY SITE REPORT','Ticket No: '+(t?.jira_ticket_no||'Not Applicable'),'Work Date: '+date,
       'Project Location: '+(t?.location||'Not Applicable'),'Supervisor name: '+(this.data?.user.name||'Not Applicable'),
       'Work Done:',this.reportDraft.work_done||'Not Applicable',''];
+    lines.push('Work Quantities');for(const row of this.workQuantities){if(row.description.trim()&&Number(row.quantity)>0)lines.push(row.description.trim()+': '+row.quantity+' '+(row.unit||'unit'));}lines.push('');
     for(const [heading,fields] of sections){lines.push(heading);for(const field of fields)lines.push(field+': '+this.reportField(field));lines.push('');}
     const status=this.reportDraft.completion_status;
     lines.push('Work Completion Status',status==='completed'?'Completed':status==='partially completed'?'Partially Completed':'In Progress');
     return lines.join('\n');
   }
-  toggleBell():void {this.bellOpen=!this.bellOpen;}
-  async selectPeer(id:string):Promise<void>{this.selectedPeerId=id;await this.markConversationRead();void this.refreshChats();}
-  private async markConversationRead():Promise<void>{
-    if(!this.selectedPeerId||!this.data||this.section!=='messages'||this.readInFlight||!this.chat.connected)return;
-    const peerId=this.selectedPeerId,me=this.data.user.id,stamp=new Date().toISOString();
-    const unread=this.data.messages.filter(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at&&!m.pending);
-    if(!unread.length)return;
-    // Clear the unread badge optimistically; the Firestore snapshot is the final source of truth.
-    const seen=new Set(unread.map(m=>m.id));
-    this.data={...this.data,
-      messages:this.data.messages.map(m=>seen.has(m.id)?{...m,read_at:stamp}:m),
-      notifications:this.data.notifications.map(n=>n.type==='direct_message'&&n.actor_id===peerId?{...n,read_at:stamp}:n)};
-    this.readInFlight=true;
-    let success=false;
-    try{await this.chat.markRead(peerId);success=true;
-      void this.api.call('markFirestoreNotificationsRead',peerId).catch(()=>{});
-    }catch(e){this.inform('Unable to mark messages as read: '+this.errorText(e),'error');}
-    finally{this.readInFlight=false;
-      if(success && this.section==='messages' && this.selectedPeerId===peerId &&
-         this.chat.messages.some(m=>m.sender_id===peerId&&m.recipient_id===me&&!m.read_at&&!m.pending))
-        void this.markConversationRead();
+
+  addWorkQuantity():void {this.workQuantities.push({description:'',quantity:1,unit:'sq.ft'});this.reportTextApplied=false;this.verifiedDraft=false;}
+  removeWorkQuantity(i:number):void {this.workQuantities.splice(i,1);this.reportTextApplied=false;this.verifiedDraft=false;}
+  loadReportTemplate():void {this.reportTextEditor=this.dailyReportPreview;this.reportTextApplied=false;this.verifiedDraft=false;}
+  applyReportText():void {
+    let text=this.reportTextEditor.replace(/\r/g,'').trim();
+    if(!text.includes('Work Quantities\n')&&text.includes('\nLabours\n')){text=text.replace('\nLabours\n','\nWork Quantities\n\nLabours\n');this.reportTextEditor=text;}
+    const ticket=this.data?.tickets.find(t=>t.id===this.reportDraft.ticket_id);
+    if(!ticket||!text.startsWith('DAILY SITE REPORT\n')||!text.includes('Ticket No: '+ticket.jira_ticket_no)){
+      this.inform('Paste a complete DAILY SITE REPORT for the selected ticket.','error');return;
     }
+    const match=text.match(/Work Done:\s*\n([\s\S]*?)\n\s*Work Quantities\b/);
+    if(!match||!match[1].trim()||match[1].trim()==='Not Applicable'){
+      this.inform('Enter an English description under Work Done.','error');return;
+    }
+    const quantities=text.match(/Work Quantities\s*\n([\s\S]*?)\n\s*Labours\b/);
+    if(!quantities){this.inform('Keep the Work Quantities section even when empty.','error');return;}
+    const workRows:Array<{description:string;quantity:number;unit:string}>=[];
+    for(const line of quantities[1].split('\n').map(x=>x.trim()).filter(Boolean)){
+      const q=line.match(/^(.+?):\s*(\d+(?:\.\d+)?)\s+(.+)$/);
+      if(!q||Number(q[2])<=0){this.inform('Invalid work quantity: '+line,'error');return;}
+      workRows.push({description:q[1],quantity:Number(q[2]),unit:q[3]});
+    }
+    const fields:[string,string][]=[['Labours','Materials Used'],['Materials Used','Equipment Used'],['Equipment Used','Work Completion Status']];
+    const resourceRows:typeof this.reportDraft.lines=[];
+    for(const [from,to] of fields){
+      const block=text.match(new RegExp('(?:^|\\n)'+from+'\\s*\\n([\\s\\S]*?)\\n\\s*'+to));
+      if(!block){this.inform('Missing report section: '+from,'error');return;}
+      for(const line of block[1].split('\n').map(x=>x.trim()).filter(Boolean)){
+        const sep=line.indexOf(':');if(sep<0){this.inform('Invalid resource line: '+line,'error');return;}
+        const name=line.slice(0,sep).trim(),raw=line.slice(sep+1).trim();
+        if(/^(Not Used|Not Applicable)$/i.test(raw))continue;
+        const quantity=raw.match(/^(\d+(?:\.\d+)?)(?:\s|$)/);
+        if(!quantity||Number(quantity[1])<=0){this.inform('Invalid quantity for '+name,'error');return;}
+        const item=this.data?.items.find(i=>i.name.toLowerCase()===name.toLowerCase());
+        if(!item){this.inform('Resource "'+name+'" is not in Materials. Add it to the item catalog before submitting.','error');return;}
+        const existing=this.reportDraft.lines.find(x=>x.item_id===item.id);
+        resourceRows.push({...existing,item_id:item.id,quantity:Number(quantity[1]),rate_mode:existing?.rate_mode||'catalog'});
+      }
+    }
+    const state=(text.split(/Work Completion Status/)[1]||'').trim().split('\n')[0].toLowerCase();
+    if(!['completed','partially completed','in progress','not started'].includes(state)){
+      this.inform('Choose a valid Work Completion Status in the pasted report.','error');return;
+    }
+    this.reportDraft.work_done=match[1].trim();this.reportDraft.completion_status=state;
+    this.reportDraft.lines=resourceRows;this.workQuantities=workRows;
+    this.reportTextApplied=true;this.verifiedDraft=false;
+    this.inform('Report text synchronized. Verify the work quantities and resource rows before submitting.','success');
   }
-  async sendMessage():Promise<void>{
-    if(this.sendingMessage||!this.data||!this.selectedPeerId||!this.newMessage.trim())return;
-    const body=this.newMessage.trim(),to=this.selectedPeerId;
-    if(!this.data.contacts.some(c=>c.id===to)){this.inform('Choose an active staff contact.','error');return;}
-    this.newMessage='';this.sendingMessage=true;
-    try{
-      // Local Firestore snapshots immediately display the message, before the server acknowledges it.
-      const id=await this.chat.send(to,body);
-      // Background push is best-effort and does not delay the chat UI.
-      void this.api.call('notifyFirestoreMessage',to,id).catch(e=>console.warn('Message push unavailable:',this.errorText(e)));
-    }catch(e){this.newMessage=body;this.inform('Message not sent: '+this.errorText(e),'error');}
-    finally{this.sendingMessage=false;}
+  get priorityTickets():Ticket[]{return (this.data?.tickets||[]).filter(t=>t.assigned_supervisor_id===this.prioritySupervisorId).sort((a,b)=>Number(a.priority_sequence||9999)-Number(b.priority_sequence||9999)||a.jira_ticket_no.localeCompare(b.jira_ticket_no));}
+  loadPriorityDraft():void {this.priorityEdits=Object.fromEntries(this.priorityTickets.map((t,i)=>[t.id,Number(t.priority_sequence)||i+1]));}
+  async saveSupervisorPriorities():Promise<void>{
+    const tickets=this.priorityTickets;
+    const priorities=tickets.map(t=>Number(this.priorityEdits[t.id]));
+    if(priorities.some(v=>!Number.isInteger(v)||v<1||v>9999)||new Set(priorities).size!==priorities.length){this.inform('Enter unique whole-number priorities from 1 to 9999.','error');return;}
+    await this.task(()=>this.api.call('setSupervisorPriorities',this.prioritySupervisorId,tickets.map(t=>({id:t.id,priority:Number(this.priorityEdits[t.id])}))),'Supervisor priorities saved.');
   }
-  async importOldChatHistory():Promise<void>{
-    if(this.role!=='admin'||this.busy)return;
-    if(!window.confirm('Copy old Direct_Messages spreadsheet records into Firestore? Existing spreadsheet records will not be deleted.'))return;
-    this.busy=true;
-    try{
-      let next=0,total=0,imported=0,skipped=0;
-      do{
-        const result=await this.api.call<{total:number;nextOffset:number;imported:number;skipped:number}>('migrateLegacyMessagesToFirestore',next);
-        total=result.total;imported+=result.imported;skipped+=result.skipped;next=result.nextOffset;
-      }while(next<total);
-      this.inform(`Historical message import finished: ${imported} imported, ${skipped} already present or skipped.`,'success');
-    }catch(e){this.inform('Message import stopped: '+this.errorText(e),'error');}
-    finally{this.busy=false;}
+
+  get externalWhatsAppLink():string {
+    let number=this.externalWhatsAppPhone.replace(/\D/g,'');
+    if(number.length===10)number='91'+number;
+    return number.length>=11&&number.length<=15?'https://wa.me/'+number:'';
   }
+  toggleBell():void {this.bellOpen=!this.bellOpen;}
   async addRate():Promise<void>{
     if(!this.newRateItemId||this.newRatePrice===null||Number(this.newRatePrice)<0||!this.newRateDate){this.inform('Select an item, date and non-negative rate.','error');return;}
     const ok=await this.task(()=>this.api.call('addItemRate',this.newRateItemId,this.newRatePrice,this.newRateDate,this.newRateSource,this.newRateNote),'Dated rate recorded; earlier rates remain unchanged.');
@@ -542,10 +455,9 @@ export class AppComponent implements OnInit,OnDestroy {
   }
 
   countForSupervisor(id:string):number{return this.cspTickets.filter(t=>t.assigned_supervisor_id===id&&(this.jiraAssignmentGroup==='all'||t.jira_assignment_group===this.jiraAssignmentGroup)).length;}
-  unreadFrom(id:string):boolean{return !!this.data?.messages.some(m=>m.sender_id===id&&m.recipient_id===this.data?.user.id&&!m.read_at);}
   fmtTime(value:string):string{const d=new Date(value);return Number.isNaN(d.valueOf())?value:new Intl.DateTimeFormat(this.lang,{dateStyle:'short',timeStyle:'short'}).format(d);}
   async copyDailyReport():Promise<void>{
-    try{await navigator.clipboard.writeText(this.dailyReportPreview);this.inform('Daily report copied.','success');}
+    try{await navigator.clipboard.writeText(this.reportTextEditor||this.dailyReportPreview);this.inform('Daily report copied.','success');}
     catch(_){this.inform('Clipboard unavailable; select and copy the preview text manually.','error');}
   }
 

@@ -43,6 +43,5 @@ export const NAV: {section:Section;icon:string;roles:('admin'|'lead'|'supervisor
  {section:'inventory',icon:'🧱',roles:['admin','lead']},
  {section:'jira',icon:'🗂️',roles:['admin']},
  {section:'workbook',icon:'📊',roles:['admin']},
- {section:'messages',icon:'💬',roles:['admin','lead','supervisor']},
  {section:'settings',icon:'⚙️',roles:['admin','lead','supervisor']}
 ];

@@ -9,7 +9,7 @@ const TABLES = Object.freeze({
   Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id', 'mobile_number', 'birth_date', 'photo_data', 'account_status'],
   Master_Items: ['id', 'type', 'name', 'current_price', 'quantity', 'rate_unit'],
   Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee', 'jira_assignment_group'],
-  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date', 'source_transcript', 'source_language'],
+  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date', 'source_transcript', 'source_language', 'work_quantities_json'],
   Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit', 'rate_id', 'rate_date', 'rate_source', 'rate_note'],
   Notifications: ['id', 'recipient_id', 'actor_id', 'type', 'title', 'body', 'target_kind', 'target_id', 'created_at', 'read_at'],
   Push_Subscriptions: ['id', 'user_id', 'token', 'device_label', 'created_at', 'updated_at'],
@@ -17,7 +17,6 @@ const TABLES = Object.freeze({
   Lead_Rules: ['id', 'supervisor_id', 'lead_id', 'rule_type', 'ticket_id', 'weekday', 'start_time', 'end_time', 'active', 'created_at'],
   Audit_Log: ['id', 'actor_id', 'action', 'target_id', 'created_at', 'before_json', 'after_json'],
   App_Settings: ['key', 'value', 'updated_at', 'updated_by'],
-  Direct_Messages: ['id','sender_id','recipient_id','body','created_at','read_at'],
   Item_Rates: ['id','item_id','category','old_rate','new_rate','rate_unit','changed_at','changed_by','effective_date','source','note'],
   CSP_Staff_Profiles: ['role','name','email','mobile_number','manager_name','review_status','source']
 });
@@ -423,7 +422,6 @@ function getBootstrap(sessionToken) {
         return rows_(ss,'Users').filter(function(u){return (u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true')) && (String(u.manager_id)===String(user.id) || supIds.has(String(u.id)));}).map(publicRow_);
       })() : [],
     notifications: notificationRows_(ss, user.id),
-    messages: [], // V4: realtime messages are loaded directly from Firestore.
     contacts: rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';}).map(function(u){return {id:u.id,name:u.name,role:u.role};}),
     jiraReady: role === 'admin' && jiraConfigured_(props),
     reportingWorkbookReady:!!props.getProperty('REPORTING_WORKBOOK_ID'),
@@ -465,7 +463,7 @@ function reportsFor_(ss, user) {
     const view = {id:r.id, ticket_id:r.ticket_id, supervisor_id:r.supervisor_id,
       ticket_no:ticket.jira_ticket_no || 'Unknown ticket', location:ticket.location || '',
       supervisor_name:supervisor.name || 'Unknown user', date:r.date,work_date:r.work_date||String(r.date).slice(0,10),
-      work_done:r.work_done,daily_report_text:r.daily_report_text||'', source_transcript:r.source_transcript||'', source_language:r.source_language||'', completion_status:r.completion_status, status:r.status,
+      work_done:r.work_done,daily_report_text:r.daily_report_text||'', source_transcript:r.source_transcript||'', source_language:r.source_language||'', work_quantities_json:r.work_quantities_json||'[]', completion_status:r.completion_status, status:r.status,
       revision_note:r.revision_note || '', revision_count:Number(r.revision_count || 0),
       work_measure:Number(r.work_measure||0),work_measure_unit:r.work_measure_unit||'',
       lines:byReport[String(r.id)] || []};
@@ -720,6 +718,18 @@ function reportLinePayload_(ss, payload, prior) {
       rate_source:r?String(r.source||'Catalog'):'Legacy catalog',rate_note:r?String(r.note||''):''});
   });
 }
+
+function validateWorkQuantities_(input){
+  if(input===undefined || input===null)return [];
+  if(!Array.isArray(input)||input.length>60)throw new Error('Work quantities must be a list of up to 60 items.');
+  return input.map(function(row){
+    const description=text_(row.description,'Work activity',150,true),unit=text_(row.unit,'Unit',40,true);
+    const quantity=number_(row.quantity,'Work quantity',false);
+    if(quantity<=0)throw new Error('Work quantity must be positive.');
+    return {description:description,quantity:quantity,unit:unit};
+  });
+}
+
 function dailyReportText_(payload,ticket,sup){
   const text=text_(payload.daily_report_text||'', 'Daily site report', 11000, true);
   if(!ticket||!sup||!text.startsWith('DAILY SITE REPORT\n')||
@@ -729,9 +739,22 @@ function dailyReportText_(payload,ticket,sup){
     text.indexOf('Equipment Used')<0||text.indexOf('Work Completion Status')<0){
     throw new Error('The daily site report preview is incomplete. Generate and verify it before submitting.');
   }
+  // Reject tampering that would make the stored copy disagree with structured spreadsheet values.
+  const quantities=validateWorkQuantities_(payload.work_quantities);
+  if(quantities.length&&!text.includes('Work Quantities\n'))throw new Error('Work quantities section is missing.');
+  quantities.forEach(function(q){
+    if(text.indexOf(q.description+': '+q.quantity+' '+q.unit)<0)throw new Error('Work quantity does not match the report text: '+q.description);
+  });
+  const resources=text.match(/(?:^|\n)(?:Labours|Materials Used|Equipment Used)\n/g)||[];
+  if(resources.length!==3)throw new Error('The report must contain all three resource sections.');
   // Always store the final reviewed English Work Done, not an older local-language preview.
+  const expectedStatus=String(payload.completion_status||'').trim().toLowerCase();
+  const recordedStatus=String(text.split('Work Completion Status').pop()||'').trim().split('\n')[0].toLowerCase();
+  if(expectedStatus!==recordedStatus)throw new Error('Completion status differs from the report text. Click Apply text changes again.');
+  const day=siteDate_(payload.work_date,'Work date',true).split('-').reverse().join('/');
+  if(text.indexOf('Work Date: '+day)<0)throw new Error('Work date differs from the report text. Reload the report template.');
   const english=text_(payload.work_done,'English Work Done',3000,true);
-  return text.replace(/(Work Done:\s*\n)[\s\S]*?(\n\nLabours\b)/,function(_,head,tail){return head+english+tail;});
+  return text.replace(/(Work Done:\s*\n)[\s\S]*?(\n\nWork Quantities\b)/,function(_,head,tail){return head+english+tail;});
 }
 function submitReport(sessionToken,payload) {
   if (!payload || typeof payload!=='object') throw new Error('Invalid report.');
@@ -757,7 +780,7 @@ function submitReport(sessionToken,payload) {
     if(!reviewer||String(reviewer)===String(sup.id)||!rows_(ss,'Users').some(function(u){return u.role==='lead'&&String(u.id)===String(reviewer);}))throw new Error('Choose a separate reviewing lead for this ticket before submitting a report.');
     const report={id:newId_(),ticket_id:ticket.id,supervisor_id:sup.id,date:new Date().toISOString(),work_date:siteDate_(payload.work_date||Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd'),'Work date',true),
       approver_id:reviewer,work_measure:number_(payload.work_measure||0,'Work quantity',true),work_measure_unit:text_(payload.work_measure_unit||'','Work unit',32,false),
-      work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),source_transcript:String(payload.source_transcript||'').slice(0,5000),source_language:String(payload.source_language||''),completion_status:completion,
+      work_done:work,daily_report_text:dailyReportText_(payload, ticket, sup),source_transcript:String(payload.source_transcript||'').slice(0,5000),source_language:String(payload.source_language||''),work_quantities_json:JSON.stringify(validateWorkQuantities_(payload.work_quantities)),completion_status:completion,
       amount_of_work:money_(lines.reduce(function(total,l){return total+l.quantity*l.locked_price;},0)),
       status:'pending',revision_note:'',revision_count:0};
     write_(ss,'Reports',report);
@@ -799,6 +822,7 @@ function reviseReport(sessionToken,reportId,payload) {
     report.work_done=text_(payload.work_done,'Work performed',3000,true);
     report.source_transcript=String(payload.source_transcript||report.source_transcript||'').slice(0,5000);
     report.source_language=String(payload.source_language||report.source_language||'');
+    report.work_quantities_json=JSON.stringify(validateWorkQuantities_(payload.work_quantities));
     const currentTicket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(report.ticket_id);});
     report.daily_report_text=dailyReportText_(payload,currentTicket,sup);
     report.completion_status=completion;
@@ -1158,6 +1182,13 @@ function jiraMapIssue_(issue, settings) {
   };
 }
 
+
+function cspCanonicalJiraName_(name){
+  const key=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  const names={raju:'rajuvenkatesh',balakrishnan:'balakrishanan',kalairasan:'kalai',vasanth:'vasant',shiva:'siva',vignesh:'vighnesh',bankim:'bankim'};
+  return names[key]||key;
+}
+
 function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
   const rows = issues.map(function(issue) { return jiraMapIssue_(issue, settings); });
   return transaction_(function(ss) {
@@ -1165,16 +1196,16 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
     const existing = rows_(ss, 'Tickets');
     const users = rows_(ss, 'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
     const normalize=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
-    const aliases={vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
+    const aliases={raju:'rajuvenkatesh',kalairasan:'kalai',shiva:'siva',vignesh:'vighnesh',vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
     const approved=['rajuvenkatesh','murugeshsubbappa','ayush','guna','balakrishanan','kalai','vasant','prakash','thangapandi','suresh','kartikeyan','kartik'];
-    const approvedName=function(v){const key=normalize(v);return approved.indexOf(aliases[key]||key)!==-1;};
+    const approvedName=function(v){const key=normalize(v);return approved.indexOf(cspCanonicalJiraName_(aliases[key]||key))!==-1;};
     const resolvedSupervisor=function(t){
       let assignees=[];try{assignees=JSON.parse(t.jira_assignees||'[]');}catch(_){}
       const matched=users.filter(function(u){if(!approvedName(u.name))return false;
         const workEmail=String(u.email||'').toLowerCase();
         const emailName=workEmail.endsWith('@sadhguru.org')?normalize(workEmail.split('@')[0].replace(/-ext$/,'').replace(/\./g,' ')):'';
-        return assignees.some(function(a){const name=normalize(a.name);const named=aliases[name]||name;
-          return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&approvedName(name)&&(named===(aliases[normalize(u.name)]||normalize(u.name))||name===emailName));});
+        return assignees.some(function(a){const name=normalize(a.name);const named=cspCanonicalJiraName_(aliases[name]||name);
+          return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&approvedName(name)&&(named===cspCanonicalJiraName_(aliases[normalize(u.name)]||normalize(u.name))||name===emailName));});
       });
       return matched.length===1 ? matched[0].id : '';
     };
@@ -1587,13 +1618,13 @@ function saveTicketLead(sessionToken,ticketId,leadId) {
 }
 
 /** Import user-requested staff names. Blank email means pending admin verification: no login access. */
-const CSP_SUPERVISOR_ROSTER=['Raju','Murugesh Subbappa','Ayush','Guna','Balakrishnan','Kalai','Vasanth','Prakash','Thangapandi','SURESH','KARTIKEYAN','KARTIK'];
+const CSP_SUPERVISOR_ROSTER=['Raju venkatesh','Murugesh Subbappa','Ayush','Guna','Balakrishanan','Kalai','Vasant','Prakash','Thangapandi','SURESH','KARTIKEYAN','KARTIK'];
 function syncCspRoster(sessionToken) {
   return transaction_(function(ss){
     requireRole_(ss,['admin'],sessionToken);
     const users=rows_(ss,'Users');const tickets=rows_(ss,'Tickets');
     const norm=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
-    const aliases={raju:['rajuvenkatesh'],balakrishnan:['balakrishnanan'],vasanth:['vasant'],kalai:['kalaiarasan']};
+    const aliases={rajuvenkatesh:['raju'],balakrishanan:['balakrishnan'],vasant:['vasanth'],kalai:['kalairasan']};
     let created=0,kept=0,verified=0;
     CSP_SUPERVISOR_ROSTER.forEach(function(name){
       const key=norm(name);const candidate=users.find(function(u){return norm(u.name)===key || (aliases[key]||[]).indexOf(norm(u.name))!==-1;});
@@ -1623,6 +1654,54 @@ function syncCspRoster(sessionToken) {
       if(matched.length===1){t.assigned_supervisor_id=matched[0].id;t.assigned_by='jira';t.assigned_at=new Date().toISOString();t.assignment_status='assigned';write_(ss,'Tickets',t);linkedTickets++;}
     });
     return {created:created,existing:kept,jiraEmailSuggestions:verified,ticketsLinked:linkedTickets,needsReview:CSP_SUPERVISOR_ROSTER.length-verified,notes:'Add manager and check Jira identity/email before enabling sign-in. Leads acting as supervisors need a reviewing lead.'};
+  });
+}
+
+
+
+/** Administrator-approved Jira display names. Blank mappings are intentionally absent. */
+const CSP_EXPLICIT_JIRA_NAME_PAIRS=Object.freeze({
+  'Raju venkatesh':'Raju','Balakrishanan':'Balakrishnan','Kalai':'Kalairasan',
+  'Vasant':'Vasanth','Siva':'Shiva','Vighnesh':'Vignesh'
+});
+function applyJiraStaffNames(sessionToken){
+  return transaction_(function(ss){
+    requireRole_(ss,['admin'],sessionToken);
+    const users=rows_(ss,'Users');let updated=0;const unmatched=[];
+    Object.keys(CSP_EXPLICIT_JIRA_NAME_PAIRS).forEach(function(oldName){
+      const newName=CSP_EXPLICIT_JIRA_NAME_PAIRS[oldName];
+      const targets=users.filter(function(u){return String(u.name||'').toLowerCase()===oldName.toLowerCase()||String(u.name||'').toLowerCase()===newName.toLowerCase();});
+      if(targets.length!==1){unmatched.push(oldName);return;}
+      if(targets[0].name!==newName){targets[0].name=newName;write_(ss,'Users',targets[0]);updated++;}
+    });
+    return {updated:updated,unmatched:unmatched};
+  });
+}
+
+function setSupervisorPriorities(sessionToken,supervisorId,entries){
+  return transaction_(function(ss){
+    requireRole_(ss,['admin'],sessionToken);
+    if(!Array.isArray(entries)||entries.length>2000)throw new Error('Invalid priority list.');
+    const supervisor=rows_(ss,'Users').find(function(u){return String(u.id)===String(supervisorId)&&(u.role==='supervisor'||String(u.can_supervise)==='true');});
+    if(!supervisor)throw new Error('Select a valid supervisor.');
+    const all=rows_(ss,'Tickets').filter(function(t){return String(t.assigned_supervisor_id)===String(supervisorId);});
+    const original=new Set(all.map(function(t){return String(t.id);}));
+    if(entries.length!==original.size)throw new Error('Reload the ticket list before saving priorities.');
+    const used=new Set(),numbers=new Set();
+    entries.forEach(function(e){
+      const id=String(e.id||''),p=Number(e.priority);
+      if(!original.has(id)||used.has(id)||!Number.isInteger(p)||p<1||p>9999||numbers.has(p))throw new Error('Each assigned ticket needs one unique priority between 1 and 9999.');
+      used.add(id);numbers.add(p);
+    });
+    const ranking=Object.fromEntries(entries.map(function(e){return [String(e.id),Number(e.priority)];}));
+    const sh=ss.getSheetByName('Tickets');
+    const col=TABLES.Tickets.indexOf('priority_sequence')+1;
+    const last=sh.getLastRow();
+    if(last>1){const range=sh.getRange(2,col,last-1,1),values=range.getValues();
+      all.forEach(function(t){values[t._row-2][0]=ranking[String(t.id)];});
+      range.setValues(values);
+    }
+    return {updated:all.length};
   });
 }
 
@@ -1909,12 +1988,11 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'deleteReportingWorkbookRow','insertReportingWorkbookColumn','deleteReportingWorkbookColumn',
   'seedCspDirectory','getDirectory','saveDirectoryCell','addDirectoryRow',
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
-  'saveTicketLead','syncCspRoster','setTicketPriority','listCivilTickets',
-  'interpretWorkVoice','interpretWorkAudio','localizeRevision','seedLegacyCspItems',
+  'saveTicketLead','syncCspRoster','setTicketPriority','setSupervisorPriorities','applyJiraStaffNames','listCivilTickets',
+  'localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
-  'getLiveUpdates','getDirectMessages','sendDirectMessage','markDirectMessagesRead','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
+  'getLiveUpdates','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
   'renameReportingWorkbookColumn','importScreenshotStaffProfiles',
-  'getFirestoreChatToken','notifyFirestoreMessage','markFirestoreNotificationsRead','migrateLegacyMessagesToFirestore'
 ]);
 
 function doPost(e) {
@@ -1929,11 +2007,11 @@ function doPost(e) {
       listJiraProjects, syncJiraTickets, fetchJiraTicketByKey, testJiraConnection, listJiraServiceDesks, listJiraQueues,
       listJiraQueueIssues, getReportingWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
-      addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority,
-      listCivilTickets, interpretWorkVoice, interpretWorkAudio, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
-      sendPushTest, saveMenuLabels, getLiveUpdates,getDirectMessages,sendDirectMessage,markDirectMessagesRead,addItemRate,
+      addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority, setSupervisorPriorities, applyJiraStaffNames,
+      listCivilTickets, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
+      sendPushTest, saveMenuLabels, getLiveUpdates,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
-      getFirestoreChatToken,notifyFirestoreMessage,markFirestoreNotificationsRead,migrateLegacyMessagesToFirestore,
+      
     };
     const handler = functions[method];
     if (CSP_PUBLIC_RPC_METHODS.indexOf(method) < 0 || typeof handler !== 'function') {
@@ -2064,7 +2142,7 @@ function sendPushTest(sessionToken) {
 
 
 /** Editable navigation labels: stored in the spreadsheet, never public without a session. */
-const CSP_MENU_KEYS = ['overview','tickets','reports','review','team','inventory','jira','workbook','notifications','messages','settings'];
+const CSP_MENU_KEYS = ['overview','tickets','reports','review','team','inventory','jira','workbook','notifications','settings'];
 function getMenuLabels_(existingSs) {
   const ss = existingSs || db_();
   const entries = rows_(ss,'App_Settings').filter(function(x){return String(x.key).indexOf('menu:')===0;});
@@ -2104,196 +2182,10 @@ function getLiveUpdates(sessionToken){
   const contacts=rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';})
     .map(function(u){return {id:u.id,name:u.name,role:u.role};});
   return {tickets:scopedTickets_(ss,user),reports:reportsFor_(ss,user),notifications:notificationRows_(ss,user.id),
-    messages:[],items:items,contacts:contacts, // V4: avoid reading old Sheets chat on live updates.
+    items:items,contacts:contacts,
     itemRates:allRates.filter(function(r){return user.role!=='supervisor'||rateDay_(r)<=Utilities.formatDate(new Date(),'Asia/Kolkata','yyyy-MM-dd');}).map(publicRow_).reverse()};
 }
 
-/**
- * CSP SitePulse V4: secure Firestore messenger integration.
- * Keep FCM_SERVICE_ACCOUNT_JSON in Apps Script Script Properties only.
- * The Firebase browser receives a short-lived *custom sign-in token*, never the private key.
- */
-function cspChatServiceAccount_(){
-  const props=PropertiesService.getScriptProperties();
-  const raw=props.getProperty('FCM_SERVICE_ACCOUNT_JSON');
-  if(!raw)throw new Error('FCM_SERVICE_ACCOUNT_JSON is not set. Configure the private service account in Apps Script Project Settings.');
-  const account=JSON.parse(raw);
-  const project=String(props.getProperty('FCM_PROJECT_ID')||'').trim();
-  if(!account.client_email||!account.private_key||!account.project_id||!project||account.project_id!==project)
-    throw new Error('Firebase service-account configuration or project ID is inconsistent.');
-  return {account:account,project:project};
-}
-function cspChatBase64_(obj){
-  return Utilities.base64EncodeWebSafe(Utilities.newBlob(JSON.stringify(obj)).getBytes()).replace(/=+$/,'');
-}
-/** Called after an already-valid Apps Script OTP session, never from public unauthenticated login. */
-function getFirestoreChatToken(sessionToken){
-  const ss=db_();
-  const user=identity_(ss,sessionToken);
-  const settings=cspChatServiceAccount_();
-  const session=rows_(ss,'Sessions').find(function(r){return String(r.token_hash)===digest_(sessionToken);});
-  if(!session)throw new Error('Session not found. Sign in again.');
-  const uid=String(user.id||'');
-  if(!/^[A-Za-z0-9_-]{8,128}$/.test(uid))throw new Error('Staff ID is not valid for Firebase.');
-  const now=Math.floor(Date.now()/1000);
-  const expiry=new Date(session.expires_at).getTime();
-  if(!Number.isFinite(expiry)||expiry<=Date.now())throw new Error('Your SitePulse session has expired.');
-  const account=settings.account;
-  const unsigned=cspChatBase64_({alg:'RS256',typ:'JWT'})+'.'+cspChatBase64_({
-    iss:account.client_email,sub:account.client_email,
-    aud:'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
-    iat:now,exp:now+3300,uid:uid,
-    claims:{csp_chat:true,csp_until_ms:expiry}
-  });
-  const signature=Utilities.base64EncodeWebSafe(Utilities.computeRsaSha256Signature(unsigned,account.private_key)).replace(/=+$/,'');
-  return {token:unsigned+'.'+signature,uid:uid,projectId:settings.project};
-}
-/** Uses same protected service account to access the Firestore REST API. */
-function cspChatFirestoreAccess_(){
-  const cache=CacheService.getScriptCache();
-  const saved=cache.get('csp-firestore-oauth-v4');
-  if(saved)return saved;
-  const account=cspChatServiceAccount_().account,now=Math.floor(Date.now()/1000);
-  const unsigned=cspChatBase64_({alg:'RS256',typ:'JWT'})+'.'+cspChatBase64_({
-    iss:account.client_email,scope:'https://www.googleapis.com/auth/datastore',
-    aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3500
-  });
-  const signature=Utilities.base64EncodeWebSafe(Utilities.computeRsaSha256Signature(unsigned,account.private_key)).replace(/=+$/,'');
-  const response=UrlFetchApp.fetch('https://oauth2.googleapis.com/token',{
-    method:'post',contentType:'application/x-www-form-urlencoded',
-    payload:{grant_type:'urn:ietf:params:oauth:grant-type:jwt-bearer',assertion:unsigned+'.'+signature},
-    muteHttpExceptions:true
-  });
-  if(response.getResponseCode()!==200)throw new Error('Firestore OAuth authentication failed (HTTP '+response.getResponseCode()+').');
-  const data=JSON.parse(response.getContentText());
-  if(!data.access_token)throw new Error('Firestore OAuth response was empty.');
-  cache.put('csp-firestore-oauth-v4',data.access_token,Math.max(60,Math.min(3300,Number(data.expires_in||3600)-120)));
-  return data.access_token;
-}
-/**
- * Called asynchronously after a Firestore message is saved. The server verifies the
- * actual Firestore document before sending an FCM push, preventing forged notifications.
- */
-function notifyFirestoreMessage(sessionToken,recipientId,messageId){
-  const ss=db_(),sender=identity_(ss,sessionToken);
-  const to=rows_(ss,'Users').find(function(u){return String(u.id)===String(recipientId)&&String(u.account_status||'active')==='active'&&u.email;});
-  if(!to||String(to.id)===String(sender.id))throw new Error('Recipient is not an active staff account.');
-  const id=String(messageId||'');
-  if(!/^[a-zA-Z0-9_-]{8,150}$/.test(id))throw new Error('Invalid Firestore message ID.');
-  const project=cspChatServiceAccount_().project;
-  const url='https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(project)+'/databases/(default)/documents/sitepulseMessages/'+encodeURIComponent(id);
-  const result=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+cspChatFirestoreAccess_()},muteHttpExceptions:true});
-  if(result.getResponseCode()!==200)throw new Error('Unable to verify Firestore message (HTTP '+result.getResponseCode()+').');
-  const document=JSON.parse(result.getContentText()),fields=document.fields||{};
-  if(!fields.senderId||fields.senderId.stringValue!==String(sender.id)||
-      !fields.recipientId||fields.recipientId.stringValue!==String(to.id))
-    throw new Error('Message sender or recipient did not match the signed-in user.');
-  if(fields.readAt && fields.readAt.timestampValue)return {notified:false,alreadyRead:true};
-  return transaction_(function(tx){
-    identity_(tx,sessionToken);
-    if(rows_(tx,'Notifications').some(function(n){return n.type==='direct_message'&&String(n.target_id)===id&&String(n.recipient_id)===String(to.id);}))return {notified:true,alreadySent:true};
-    const body=String((fields.body||{}).stringValue||'').slice(0,160);
-    notify_(tx,to.id,sender.id,'direct_message','Message from '+sender.name,body,'message',id);
-    return {notified:true};
-  });
-}
-function markFirestoreNotificationsRead(sessionToken,peerId){
-  return transaction_(function(ss){
-    const me=identity_(ss,sessionToken),now=new Date().toISOString();
-    let updated=0;
-    rows_(ss,'Notifications').filter(function(n){
-      return String(n.recipient_id)===String(me.id)&&String(n.actor_id)===String(peerId)
-        && n.type==='direct_message'&&!n.read_at;
-    }).forEach(function(note){note.read_at=now;write_(ss,'Notifications',note);updated++;});
-    return {updated:updated};
-  });
-}
-function cspFirestoreValue_(value,kind){
-  if(kind==='timestamp'){
-    if(!value)return {nullValue:null};
-    const date=new Date(String(value));
-    return Number.isNaN(date.getTime())?{nullValue:null}:{timestampValue:date.toISOString()};
-  }
-  return {stringValue:String(value||'')};
-}
-/**
- * Admin-only, rerunnable import of legacy Direct_Messages rows. Firestore create-only
- * preconditions avoid overwriting current read receipts. Old spreadsheet rows remain untouched.
- */
-function migrateLegacyMessagesToFirestore(sessionToken,offsetInput){
-  const ss=db_();requireRole_(ss,['admin'],sessionToken);
-  const offset=Number(offsetInput||0);
-  if(!Number.isSafeInteger(offset)||offset<0)throw new Error('Invalid import offset.');
-  const old=rows_(ss,'Direct_Messages');
-  const page=old.slice(offset,offset+40);
-  const project=cspChatServiceAccount_().project;
-  const base='projects/'+project+'/databases/(default)/documents/sitepulseMessages/';
-  const writes=[];
-  let invalid=0;
-  page.forEach(function(row){
-    const id=String(row.id||''),sender=String(row.sender_id||''),recipient=String(row.recipient_id||'');
-    if(!/^[A-Za-z0-9_-]{8,150}$/.test(id)||!/^[A-Za-z0-9_-]{8,128}$/.test(sender)||
-        !/^[A-Za-z0-9_-]{8,128}$/.test(recipient)||sender===recipient||!String(row.body||'').trim()){
-      invalid++;return;
-    }
-    const created=new Date(row.created_at);
-    if(Number.isNaN(created.getTime())){invalid++;return;}
-    writes.push({update:{name:base+id,fields:{
-      senderId:{stringValue:sender},recipientId:{stringValue:recipient},
-      participantIds:{arrayValue:{values:[{stringValue:sender},{stringValue:recipient}].sort(function(a,b){return a.stringValue.localeCompare(b.stringValue);})}},
-      body:{stringValue:String(row.body).slice(0,1500)},
-      createdAt:{timestampValue:created.toISOString()},readAt:cspFirestoreValue_(row.read_at,'timestamp')
-    }},currentDocument:{exists:false}});
-  });
-  let imported=0,skipped=invalid;
-  if(writes.length){
-    const response=UrlFetchApp.fetch('https://firestore.googleapis.com/v1/projects/'+encodeURIComponent(project)+'/databases/(default)/documents:batchWrite',{
-      method:'post',contentType:'application/json',headers:{Authorization:'Bearer '+cspChatFirestoreAccess_()},
-      payload:JSON.stringify({writes:writes}),muteHttpExceptions:true
-    });
-    if(response.getResponseCode()!==200)throw new Error('Legacy message migration failed (HTTP '+response.getResponseCode()+').');
-    const results=JSON.parse(response.getContentText()).status||[];
-    results.forEach(function(status){
-      const code=Number(status.code||0);
-      if(code===0)imported++;
-      else if(code===6||code===9)skipped++;
-      else throw new Error('Firestore message migration was rejected: '+String(status.message||code));
-    });
-  }
-  return {total:old.length,nextOffset:Math.min(old.length,offset+40),imported:imported,skipped:skipped};
-}
-
-function messagesFor_(ss,userId){
-  return rows_(ss,'Direct_Messages').filter(function(m){return String(m.sender_id)===String(userId)||String(m.recipient_id)===String(userId);})
-    .sort(function(a,b){return String(b.created_at).localeCompare(String(a.created_at));}).slice(0,150).reverse().map(publicRow_);
-}
-function getDirectMessages(sessionToken){
-  // Lightweight chat refresh: avoids loading Jira, reports, resources and rate history.
-  const id=PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
-  if(!id)throw new Error('Project is not initialized.');
-  const ss=SpreadsheetApp.openById(id),me=identity_(ss,sessionToken);
-  return {messages:messagesFor_(ss,me.id)};
-}
-function sendDirectMessage(sessionToken,recipientId,body){
-  return transaction_(function(ss){
-    const sender=requireRole_(ss,USER_ROLES,sessionToken);
-    const to=rows_(ss,'Users').find(function(u){return String(u.id)===String(recipientId)&&u.email&&String(u.account_status||'active')==='active';});
-    if(!to||String(to.id)===String(sender.id))throw new Error('Choose an active recipient.');
-    const message={id:newId_(),sender_id:sender.id,recipient_id:to.id,body:text_(body,'Message',1500,true),created_at:new Date().toISOString(),read_at:''};
-    write_(ss,'Direct_Messages',message);
-    notify_(ss,to.id,sender.id,'direct_message','Message from '+sender.name,message.body.slice(0,160),'message',message.id);
-    return publicRow_(message);
-  });
-}
-function markDirectMessagesRead(sessionToken,peerId){
-  return transaction_(function(ss){
-    const actor=identity_(ss,sessionToken);let count=0;
-    const seen=[];
-    rows_(ss,'Direct_Messages').filter(function(m){return String(m.recipient_id)===String(actor.id)&&String(m.sender_id)===String(peerId)&&!m.read_at;}).forEach(function(m){m.read_at=new Date().toISOString();write_(ss,'Direct_Messages',m);seen.push(String(m.id));count++;});
-    if(seen.length){const stamp=new Date().toISOString();rows_(ss,'Notifications').filter(function(n){return String(n.recipient_id)===String(actor.id)&&n.type==='direct_message'&&!n.read_at&&seen.indexOf(String(n.target_id))!==-1;}).forEach(function(n){n.read_at=stamp;write_(ss,'Notifications',n);});}
-    return {count:count};
-  });
-}
 function validBirthDate_(value){
   const date=String(value||'').trim();if(!date)return '';
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(new Date(date+'T00:00:00Z').valueOf())||new Date(date+'T00:00:00Z').toISOString().slice(0,10)!==date||date>new Date().toISOString().slice(0,10))throw new Error('Enter a valid past birth date.');
