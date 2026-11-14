@@ -1183,10 +1183,31 @@ function jiraMapIssue_(issue, settings) {
 }
 
 
+/** Same people, different Jira and staff-sheet display names. Never rename staff records. */
 function cspCanonicalJiraName_(name){
   const key=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-  const names={raju:'rajuvenkatesh',balakrishnan:'balakrishanan',kalairasan:'kalai',vasanth:'vasant',shiva:'siva',vignesh:'vighnesh',bankim:'bankim'};
-  return names[key]||key;
+  const aliases={
+    raju:'rajuvenkatesh',rajuvenkatesh:'rajuvenkatesh',
+    balakrishnan:'balakrishanan',balakrishanan:'balakrishanan',balakrishnanerusappan:'balakrishanan',
+    kalairasan:'kalai',kalaijarasanpanneerselvam:'kalai',kalai:'kalai',
+    vasanth:'vasant',vasanthkongarayan:'vasant',vasant:'vasant',
+    shiva:'siva',siva:'siva',vignesh:'vighnesh',vighnesh:'vighnesh',
+    bankim:'bankim'
+  };
+  return aliases[key]||key;
+}
+function cspJiraAssigneeMatch_(ticket,user){
+  let assignees=[];
+  try{assignees=JSON.parse(ticket.jira_assignees||'[]');}catch(_){}
+  if(!Array.isArray(assignees))return false;
+  const email=String(user.email||'').toLowerCase().trim();
+  const name=cspCanonicalJiraName_(user.name);
+  return assignees.some(function(a){
+    const jiraEmail=String(a.email||'').toLowerCase().trim();
+    const jiraName=cspCanonicalJiraName_(a.name);
+    // An exact verified email is best; otherwise use the explicit display-name mapping.
+    return (email&&jiraEmail&&email===jiraEmail)||(name&&jiraName&&name===jiraName);
+  });
 }
 
 function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
@@ -1195,18 +1216,8 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
     requireRole_(ss, allowedRoles, sessionToken);
     const existing = rows_(ss, 'Tickets');
     const users = rows_(ss, 'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
-    const normalize=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
-    const aliases={raju:'rajuvenkatesh',kalairasan:'kalai',shiva:'siva',vignesh:'vighnesh',vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnan:'balakrishanan',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
-    const approved=['rajuvenkatesh','murugeshsubbappa','ayush','guna','balakrishanan','kalai','vasant','prakash','thangapandi','suresh','kartikeyan','kartik'];
-    const approvedName=function(v){const key=normalize(v);return approved.indexOf(cspCanonicalJiraName_(aliases[key]||key))!==-1;};
     const resolvedSupervisor=function(t){
-      let assignees=[];try{assignees=JSON.parse(t.jira_assignees||'[]');}catch(_){}
-      const matched=users.filter(function(u){if(!approvedName(u.name))return false;
-        const workEmail=String(u.email||'').toLowerCase();
-        const emailName=workEmail.endsWith('@sadhguru.org')?normalize(workEmail.split('@')[0].replace(/-ext$/,'').replace(/\./g,' ')):'';
-        return assignees.some(function(a){const name=normalize(a.name);const named=cspCanonicalJiraName_(aliases[name]||name);
-          return (a.email&&workEmail&&String(a.email).toLowerCase()===workEmail)||(name&&approvedName(name)&&(named===cspCanonicalJiraName_(aliases[normalize(u.name)]||normalize(u.name))||name===emailName));});
-      });
+      const matched=users.filter(function(u){return cspJiraAssigneeMatch_(t,u);});
       return matched.length===1 ? matched[0].id : '';
     };
     const byKey = Object.fromEntries(existing.map(function(t) { return [String(t.jira_ticket_no).toUpperCase(), t]; }));
@@ -1625,6 +1636,7 @@ function syncCspRoster(sessionToken) {
     const users=rows_(ss,'Users');const tickets=rows_(ss,'Tickets');
     const norm=function(v){return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');};
     const aliases={rajuvenkatesh:['raju'],balakrishanan:['balakrishnan'],vasant:['vasanth'],kalai:['kalairasan']};
+    const approvedName=function(n){return CSP_SUPERVISOR_ROSTER.some(function(x){return cspCanonicalJiraName_(n)===cspCanonicalJiraName_(x);});};
     let created=0,kept=0,verified=0;
     CSP_SUPERVISOR_ROSTER.forEach(function(name){
       const key=norm(name);const candidate=users.find(function(u){return norm(u.name)===key || (aliases[key]||[]).indexOf(norm(u.name))!==-1;});
@@ -1659,22 +1671,28 @@ function syncCspRoster(sessionToken) {
 
 
 
-/** Administrator-approved Jira display names. Blank mappings are intentionally absent. */
-const CSP_EXPLICIT_JIRA_NAME_PAIRS=Object.freeze({
-  'Raju venkatesh':'Raju','Balakrishanan':'Balakrishnan','Kalai':'Kalairasan',
-  'Vasant':'Vasanth','Siva':'Shiva','Vighnesh':'Vignesh'
-});
-function applyJiraStaffNames(sessionToken){
+/** Link existing synced CIVIL tickets using Jira's actual assigned staff, without changing any user record. */
+function linkJiraAssignedTickets(sessionToken){
   return transaction_(function(ss){
     requireRole_(ss,['admin'],sessionToken);
-    const users=rows_(ss,'Users');let updated=0;const unmatched=[];
-    Object.keys(CSP_EXPLICIT_JIRA_NAME_PAIRS).forEach(function(oldName){
-      const newName=CSP_EXPLICIT_JIRA_NAME_PAIRS[oldName];
-      const targets=users.filter(function(u){return String(u.name||'').toLowerCase()===oldName.toLowerCase()||String(u.name||'').toLowerCase()===newName.toLowerCase();});
-      if(targets.length!==1){unmatched.push(oldName);return;}
-      if(targets[0].name!==newName){targets[0].name=newName;write_(ss,'Users',targets[0]);updated++;}
+    const users=rows_(ss,'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
+    const tickets=rows_(ss,'Tickets').filter(function(t){return String(t.project_key||'CIVIL').toUpperCase()==='CIVIL';});
+    let linked=0,already=0,unmatched=0,ambiguous=0,manualOverrides=0;
+    tickets.forEach(function(t){
+      const matches=users.filter(function(u){return cspJiraAssigneeMatch_(t,u);});
+      if(matches.length>1){ambiguous++;return;}
+      if(!matches.length){unmatched++;return;}
+      const id=String(matches[0].id);
+      if(String(t.assigned_supervisor_id||'')===id){already++;return;}
+      if(t.assigned_by&&t.assigned_by!=='jira'){manualOverrides++;return;}
+      t.assigned_supervisor_id=id;
+      t.assigned_by='jira';
+      t.assigned_at=new Date().toISOString();
+      t.assignment_status='assigned';
+      write_(ss,'Tickets',t);linked++;
     });
-    return {updated:updated,unmatched:unmatched};
+    return {linked:linked,already:already,unmatched:unmatched,ambiguous:ambiguous,manualOverrides:manualOverrides,
+      note:'User names and profiles were not changed. Unmatched and ambiguous tickets were not reassigned.'};
   });
 }
 
@@ -1988,7 +2006,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'deleteReportingWorkbookRow','insertReportingWorkbookColumn','deleteReportingWorkbookColumn',
   'seedCspDirectory','getDirectory','saveDirectoryCell','addDirectoryRow',
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
-  'saveTicketLead','syncCspRoster','setTicketPriority','setSupervisorPriorities','applyJiraStaffNames','listCivilTickets',
+  'saveTicketLead','syncCspRoster','setTicketPriority','setSupervisorPriorities','linkJiraAssignedTickets','listCivilTickets',
   'localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
   'getLiveUpdates','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
@@ -2007,7 +2025,7 @@ function doPost(e) {
       listJiraProjects, syncJiraTickets, fetchJiraTicketByKey, testJiraConnection, listJiraServiceDesks, listJiraQueues,
       listJiraQueueIssues, getReportingWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
-      addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority, setSupervisorPriorities, applyJiraStaffNames,
+      addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority, setSupervisorPriorities, linkJiraAssignedTickets,
       listCivilTickets, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
       sendPushTest, saveMenuLabels, getLiveUpdates,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
