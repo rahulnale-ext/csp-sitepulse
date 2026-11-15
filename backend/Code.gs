@@ -1196,18 +1196,30 @@ function cspCanonicalJiraName_(name){
   };
   return aliases[key]||key;
 }
-function cspJiraAssigneeMatch_(ticket,user){
-  let assignees=[];
-  try{assignees=JSON.parse(ticket.jira_assignees||'[]');}catch(_){}
-  if(!Array.isArray(assignees))return false;
+/** Jira custom assignment-group fields have precedence over the generic issue Assignee.
+ * If the custom fields aren't available, use Jira's built-in Assignee.
+ * This never changes an issue or a staff name in Jira. */
+function cspTicketJiraOwners_(ticket){
+  let raw=[];
+  try{raw=JSON.parse(String(ticket.jira_assignees||'[]'));}catch(_){}
+  if(!Array.isArray(raw))raw=[];
+  const valid=raw.filter(function(a){return a && (String(a.name||'').trim() || String(a.email||'').trim());});
+  const grouped=valid.filter(function(a){return String(a.group||'').trim();});
+  if(grouped.length)return grouped;
+  if(valid.length)return valid;
+  // Legacy rows may have been imported before jira_assignees existed.
+  const name=String(ticket.jira_assignee||'').trim();
+  return name?[{name:name,email:'',group:''}]:[];
+}
+function cspJiraOwnerMatches_(owner,user){
   const email=String(user.email||'').toLowerCase().trim();
-  const name=cspCanonicalJiraName_(user.name);
-  return assignees.some(function(a){
-    const jiraEmail=String(a.email||'').toLowerCase().trim();
-    const jiraName=cspCanonicalJiraName_(a.name);
-    // An exact verified email is best; otherwise use the explicit display-name mapping.
-    return (email&&jiraEmail&&email===jiraEmail)||(name&&jiraName&&name===jiraName);
-  });
+  const jiraEmail=String(owner.email||'').toLowerCase().trim();
+  const userName=cspCanonicalJiraName_(user.name);
+  const jiraName=cspCanonicalJiraName_(owner.name);
+  return Boolean((email&&jiraEmail&&email===jiraEmail)||(userName&&jiraName&&userName===jiraName));
+}
+function cspJiraAssigneeMatch_(ticket,user){
+  return cspTicketJiraOwners_(ticket).some(function(owner){return cspJiraOwnerMatches_(owner,user);});
 }
 
 function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
@@ -1677,22 +1689,35 @@ function linkJiraAssignedTickets(sessionToken){
     requireRole_(ss,['admin'],sessionToken);
     const users=rows_(ss,'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
     const tickets=rows_(ss,'Tickets').filter(function(t){return String(t.project_key||'CIVIL').toUpperCase()==='CIVIL';});
-    let linked=0,already=0,unmatched=0,ambiguous=0,manualOverrides=0;
+    let linked=0,already=0,unmatched=0,ambiguous=0,manualOverrides=0,clearedStale=0,withoutAssignee=0;
+    const counts={};
     tickets.forEach(function(t){
-      const matches=users.filter(function(u){return cspJiraAssigneeMatch_(t,u);});
+      const owners=cspTicketJiraOwners_(t);
+      if(!owners.length){withoutAssignee++;return;}
+      // Determine matching SitePulse identities exclusively from the stored Jira assignee.
+      const matches=users.filter(function(u){return owners.some(function(a){return cspJiraOwnerMatches_(a,u);});});
+      const current=String(t.assigned_supervisor_id||'');
+      const manual=Boolean(t.assigned_by && t.assigned_by!=='jira');
       if(matches.length>1){ambiguous++;return;}
-      if(!matches.length){unmatched++;return;}
+      if(!matches.length){
+        unmatched++;
+        // Remove only old AUTO-linked records when the Jira assignee no longer matches.
+        // Manual assignments are never touched.
+        if(current && !manual){t.assigned_supervisor_id='';t.assigned_by='';t.assignment_status='';write_(ss,'Tickets',t);clearedStale++;}
+        return;
+      }
       const id=String(matches[0].id);
-      if(String(t.assigned_supervisor_id||'')===id){already++;return;}
-      if(t.assigned_by&&t.assigned_by!=='jira'){manualOverrides++;return;}
+      counts[id]=(counts[id]||0)+1;
+      if(current===id){already++;return;}
+      if(manual){manualOverrides++;return;}
       t.assigned_supervisor_id=id;
       t.assigned_by='jira';
       t.assigned_at=new Date().toISOString();
       t.assignment_status='assigned';
       write_(ss,'Tickets',t);linked++;
     });
-    return {linked:linked,already:already,unmatched:unmatched,ambiguous:ambiguous,manualOverrides:manualOverrides,
-      note:'User names and profiles were not changed. Unmatched and ambiguous tickets were not reassigned.'};
+    return {linked:linked,already:already,unmatched:unmatched,ambiguous:ambiguous,manualOverrides:manualOverrides,clearedStale:clearedStale,withoutAssignee:withoutAssignee,
+      note:'SitePulse-only reconciliation: no Jira issues or staff profiles were edited. Counts reflect synced ticket rows, not Jira saved-filter totals.'};
   });
 }
 

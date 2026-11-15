@@ -91,13 +91,12 @@ export class AppComponent implements OnInit,OnDestroy {
   private normalizeName(v:unknown):string{return String(v||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
   private isCspSupervisorTicket(t:Ticket):boolean {
     if(t.project_key&&String(t.project_key).toUpperCase()!=='CIVIL')return false;
-    const people=[t.jira_assignee,t.engineer_name];
-    try {const named=JSON.parse(String(t.jira_assignees||'[]')); if(Array.isArray(named))people.push(...named.map((x:{name?:string})=>x.name||''));}catch(_){}
-    const aliases:Record<string,string>={raju:'rajuvenkatesh',balakrishnan:'balakrishanan',kalairasan:'kalai',kalaiarasan:'kalai',shiva:'siva',vignesh:'vighnesh',vasanthkongarayan:'vasant',vasanth:'vasant',balakrishnanerusappan:'balakrishanan',kalaijarasanpanneerselvam:'kalai',karthikeyan:'kartikeyan',karthik:'kartik'};
-    const allowed=new Set(this.supervisorNames.map(x=>this.normalizeName(x)));
-    return people.some(x=>{const n=this.normalizeName(x);return allowed.has(aliases[n]||n);});
+    // The backend has verified Jira identity against staff records. Do not hide
+    // assigned tickets using a second, less reliable comparison of display names.
+    return Boolean(t.assigned_supervisor_id);
   }
   get cspTickets():Ticket[]{return (this.data?.tickets||[]).filter(t=>this.isCspSupervisorTicket(t));}
+
   get locations():string[]{return Array.from(new Set(this.cspTickets.map(t=>String(t.location||'').trim()).filter(Boolean))).sort();}
   get ticketGroups(){const all=this.cspTickets;return [
     {id:'all',name:'All tickets',count:all.length},
@@ -271,7 +270,7 @@ export class AppComponent implements OnInit,OnDestroy {
   async saveItem():Promise<void>{const ok=await this.task(()=>this.api.call('saveMasterItem',this.editResource),'Resource saved.');if(ok)this.editItem();}
   async removeItem(item:Resource):Promise<void>{if(!window.confirm(`Remove ${item.name}?`))return;await this.task(()=>this.api.call('deleteMasterItem',item.id),'Resource removed.');}
   async seedItems():Promise<void>{await this.task(()=>this.api.call('seedLegacyCspItems'),'Default resource names added where missing.');}
-  async linkJiraAssignedTickets():Promise<void>{await this.task(async()=>{const r=await this.api.call<{linked:number;already:number;unmatched:number;ambiguous:number;manualOverrides:number}>('linkJiraAssignedTickets');this.inform(`Tickets linked: ${r.linked}. Already matched: ${r.already}. Unmatched: ${r.unmatched}. Ambiguous: ${r.ambiguous}. Manual overrides kept: ${r.manualOverrides}.`,'success');},'');}
+  async linkJiraAssignedTickets():Promise<void>{await this.task(async()=>{const r=await this.api.call<{linked:number;already:number;unmatched:number;ambiguous:number;manualOverrides:number;clearedStale:number;withoutAssignee:number}>('linkJiraAssignedTickets');this.inform(`Linked: ${r.linked}; already correct: ${r.already}; cleared stale automatic links: ${r.clearedStale}; unmatched Jira names: ${r.unmatched}; tickets missing assignee: ${r.withoutAssignee}; ambiguous: ${r.ambiguous}; manual overrides kept: ${r.manualOverrides}. Check Jira saved-filter coverage if counts differ.`,'success');},'');}
   async seedRoster():Promise<void>{await this.task(()=>this.api.call('syncCspRoster'),'Supervisor roster updated. Verify emails and reporting leads.');}
   async markRead(notice:Notice):Promise<void>{if(notice.read_at)return;await this.task(()=>this.api.call('markNotificationRead',notice.id),'');}
   async enablePush():Promise<void>{this.busy=true;try{await this.push.enable((_title,_body)=>{void this.refreshLive();});this.inform('This device is ready to receive notifications.','success');}catch(e){this.inform(this.errorText(e),'error');}finally{this.busy=false;}}
