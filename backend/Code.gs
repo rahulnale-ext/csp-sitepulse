@@ -1248,7 +1248,9 @@ function upsertJiraIssues_(sessionToken, allowedRoles, issues, settings) {
       if (old) {
         const match=resolvedSupervisor(t);
         const merged = Object.assign({}, old, t, {id: old.id, _row: old._row});
-        if(match && String(old.assigned_supervisor_id||'')!==String(match) && (!old.assigned_by||old.assigned_by==='jira')){
+        // Do not overwrite a queue-verified identity during a broad CIVIL history import.
+        if(String(old.assigned_by||'')==='jira_queue'){merged.assigned_supervisor_id=old.assigned_supervisor_id;merged.assigned_by='jira_queue';merged.jira_assignees=old.jira_assignees;merged.jira_assignment_group=old.jira_assignment_group;merged.assignment_status=old.assignment_status;}
+        if(String(old.assigned_by||'')!=='jira_queue' && match && String(old.assigned_supervisor_id||'')!==String(match) && (!old.assigned_by||old.assigned_by==='jira')){
           merged.assigned_supervisor_id=match;merged.assigned_at=new Date().toISOString();merged.assigned_by='jira';merged.assignment_status='assigned';
           newlyAssigned.push({ticket:merged,previous:String(old.assigned_supervisor_id||'')});
         }
@@ -1721,6 +1723,179 @@ function linkJiraAssignedTickets(sessionToken){
   });
 }
 
+
+/**
+ * V6: Jira queue membership is a stronger source for the assignee view than the
+ * generic Jira issue.assignee. These operations are READ ONLY against Jira.
+ * They only update local SitePulse ticket records.
+ *
+ * Preview first. If Jira does not expose individual supervisor queues via its
+ * Service Management API, DO NOT approximate their saved-view counts with the
+ * broad CIVIL search. Ask the Jira admin for filter / queue configuration.
+ */
+function cspQueuePerson_(queueName,users){
+  const normalized=String(queueName||'').replace(/^.*(?:>|\||\/|::)\s*/,'').trim();
+  const strip=normalized.replace(/^Assignee[_ ](?:Maintenance|New Works|New Projects)\s*[-:]\s*/i,'');
+  const matched=users.filter(function(u){return cspCanonicalJiraName_(u.name)===cspCanonicalJiraName_(strip);});
+  return matched.length===1?matched[0]:null;
+}
+function cspQueueGroup_(name){
+  const n=String(name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(n.indexOf('maintenance')>=0)return 'maintenance';
+  if(n.indexOf('newworks')>=0)return 'new_works';
+  if(n.indexOf('newprojects')>=0)return 'new_projects';
+  return 'verified_queue';
+}
+function cspSupervisorQueuePlan_(settings,users){
+  // Optional: Jira may display nested assignee views as SAVED FILTERS rather
+  // than Jira Service Management queues. Map ONLY explicit shared filter IDs.
+  // Example Script Property JIRA_SUPERVISOR_FILTERS_JSON:
+  // {"Vasanth":{"filterId":12345,"group":"maintenance"},"Raju":{"filterId":23456,"group":"new_works"}}
+  const rawConfig=String(settings.props.getProperty('JIRA_SUPERVISOR_FILTERS_JSON')||'').trim();
+  if(rawConfig){
+    let config;
+    try{config=JSON.parse(rawConfig);}catch(_){throw new Error('JIRA_SUPERVISOR_FILTERS_JSON is invalid JSON. No changes made.');}
+    if(!config||typeof config!=='object'||Array.isArray(config)||!Object.keys(config).length||Object.keys(config).length>30)
+      throw new Error('JIRA_SUPERVISOR_FILTERS_JSON must map 1 to 30 supervisor names to saved Jira filter IDs.');
+    const matched=[],staffIds=new Set(),filterIds=new Set();
+    Object.keys(config).forEach(function(name){
+      const value=config[name];const id=String(typeof value==='object'&&value!==null?value.filterId||'':value);
+      const group=typeof value==='object'&&value!==null?String(value.group||'verified_filter'):'verified_filter';
+      const person=cspQueuePerson_(name,users);
+      if(!person)throw new Error('Cannot match configured Jira filter for "'+String(name).slice(0,75)+'" to exactly one approved SitePulse supervisor. No changes made.');
+      if(!/^\d{1,12}$/.test(id))throw new Error('Invalid numeric Jira filter ID for '+name+'. No changes made.');
+      if(!/^(maintenance|new_works|new_projects|verified_filter)$/.test(group))throw new Error('Invalid Jira filter group for '+name+'.');
+      if(staffIds.has(String(person.id))||filterIds.has(id))throw new Error('Duplicate Jira filter identity for '+name+'. No changes made.');
+      staffIds.add(String(person.id));filterIds.add(id);
+      const details=jiraRequest_(settings,'/rest/api/2/filter/'+id);
+      if(!details||String(details.id||'')!==id)throw new Error('Jira saved filter '+id+' could not be verified.');
+      const sample=jiraRequest_(settings,'/rest/api/2/search',{jql:'filter = '+id,startAt:0,maxResults:1,fields:'key'});
+      if(!sample||!Array.isArray(sample.issues)||!Number.isFinite(Number(sample.total)))
+        throw new Error('Jira saved filter '+id+' returned invalid search results.');
+      if(sample.issues.some(function(issue){return !/^CIVIL-[1-9]\d{0,11}$/.test(String(issue.key||'').toUpperCase());}))
+        throw new Error('Jira saved filter '+id+' contains a non-CIVIL issue. Narrow the Jira filter before using it.');
+      matched.push({id:id,name:String(details.name||name),staff_id:String(person.id),staff_name:String(person.name),count:Number(sample.total),group:group,source:'filter'});
+    });
+    return {deskId:'',queues:matched,unmatchedQueues:[],allQueueCount:matched.length,source:'filter'};
+  }
+  const desks=jiraPaged_(settings,'/rest/servicedeskapi/servicedesk',20);
+  const civil=desks.filter(function(d){return String(d.projectKey||'').toUpperCase()==='CIVIL';});
+  if(civil.length!==1)throw new Error('Exactly one CIVIL service desk was expected; found '+civil.length+'. No changes made.');
+  const deskId=String(civil[0].id);
+  if(!/^\d+$/.test(deskId))throw new Error('Invalid CIVIL service desk ID.');
+  const raw=jiraPaged_(settings,'/rest/servicedeskapi/servicedesk/'+deskId+'/queue',20);
+  const matched=[],unmatched=[];
+  raw.forEach(function(q){
+    const id=String(q.id||'');if(!/^\d+$/.test(id))return;
+    const person=cspQueuePerson_(q.name,users);
+    if(person)matched.push({id:id,name:String(q.name||''),staff_id:String(person.id),staff_name:String(person.name),count:Number(q.issueCount||0),group:cspQueueGroup_(q.name),source:'queue'});
+    else unmatched.push({name:String(q.name||''),count:Number(q.issueCount||0)});
+  });
+  const duplicateQueueIds=new Set();
+  const seen=new Set();matched.forEach(function(q){if(seen.has(q.id))duplicateQueueIds.add(q.id);seen.add(q.id);});
+  if(duplicateQueueIds.size)throw new Error('Jira returned duplicate queue IDs; no changes made.');
+  return {deskId:deskId,queues:matched,unmatchedQueues:unmatched,allQueueCount:raw.length,source:'queue'};
+}
+function previewJiraSupervisorQueues(sessionToken){
+  const ss=db_();requireRole_(ss,['admin'],sessionToken);
+  const users=rows_(ss,'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
+  const plan=cspSupervisorQueuePlan_(jiraSettings_(),users);
+  return {queues:plan.queues,unmatchedQueues:plan.unmatchedQueues,allQueueCount:plan.allQueueCount,
+    note:plan.queues.length?'Review counts and then sync. Matching source: '+plan.source+'. Jira tickets will NOT be changed.':'No person-named CIVIL queues were exposed. To use exact Jira saved-filter views, ask the Jira administrator for each supervisor filter ID and configure JIRA_SUPERVISOR_FILTERS_JSON in Apps Script Script Properties.'};
+}
+function cspQueueIssues_(settings,deskId,queueId,source){
+  const keys=[];let start=0;
+  if(source==='filter'){
+    for(let page=0;page<60;page++){
+      const data=jiraRequest_(settings,'/rest/api/2/search',{jql:'filter = '+queueId,startAt:start,maxResults:50,fields:'key'});
+      if(!data||!Array.isArray(data.issues))throw new Error('Jira saved filter '+queueId+' returned invalid ticket data; no changes made.');
+      data.issues.forEach(function(issue){const key=String(issue.key||'').toUpperCase();
+        if(!/^CIVIL-[1-9]\d{0,11}$/.test(key))throw new Error('Saved filter '+queueId+' contains a non-CIVIL ticket. No changes made.');
+        keys.push(key);
+      });
+      start+=data.issues.length;
+      if(start>=Number(data.total||0))return Array.from(new Set(keys));
+      if(!data.issues.length)throw new Error('Jira saved filter '+queueId+' stopped returning tickets. No changes made.');
+    }
+    throw new Error('Jira saved filter '+queueId+' exceeds 3000 tickets; no partial import performed.');
+  }
+  const path='/rest/servicedeskapi/servicedesk/'+deskId+'/queue/'+queueId+'/issue';
+  for(let page=0;page<60;page++){
+    const data=jiraRequest_(settings,path,{start:start,limit:50});
+    if(!data||!Array.isArray(data.values))throw new Error('Jira queue '+queueId+' returned invalid ticket data; no changes made.');
+    data.values.forEach(function(issue){const key=String(issue.key||'').toUpperCase();
+      if(!/^CIVIL-[1-9]\d{0,11}$/.test(key))throw new Error('Non-CIVIL or invalid ticket in queue '+queueId+'; no changes made.');
+      keys.push(key);
+    });
+    start+=data.values.length;
+    if(data.isLastPage===true||data.values.length<50)return Array.from(new Set(keys));
+  }
+  throw new Error('Jira queue '+queueId+' exceeds 3000 tickets; no partial import performed.');
+}
+function syncJiraSupervisorQueues(sessionToken){
+  const ss=db_();requireRole_(ss,['admin'],sessionToken);
+  const users=rows_(ss,'Users').filter(function(u){return u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true');});
+  const settings=jiraSettings_();
+  const plan=cspSupervisorQueuePlan_(settings,users);
+  if(!plan.queues.length)throw new Error('No supervisor-named Jira queues found. No changes made. Use Preview Jira queues to inspect what is available.');
+  const byKey={};const conflicts=new Set();
+  plan.queues.forEach(function(queue){
+    cspQueueIssues_(settings,plan.deskId,queue.id,queue.source).forEach(function(key){
+      const previous=byKey[key];
+      if(previous&&previous.staff_id!==queue.staff_id){conflicts.add(key);return;}
+      if(!previous)byKey[key]={staff_id:queue.staff_id,staff_name:queue.staff_name,group:queue.group,queue_id:queue.id};
+    });
+  });
+  conflicts.forEach(function(key){delete byKey[key];});
+  const keys=Object.keys(byKey);
+  if(!keys.length)throw new Error('Supervisor queues contained no unambiguous CIVIL tickets. No changes made.');
+  jiraResolveAssigneeFields_(settings);jiraResolveLocationField_(settings);jiraResolveDisplayFields_(settings);
+  const mapped=[];
+  for(let i=0;i<keys.length;i+=70){
+    const batch=keys.slice(i,i+70);
+    const jql='key in ('+batch.join(',')+')';
+    const page=jiraRequest_(settings,'/rest/api/2/search',{jql:jql,maxResults:batch.length,fields:jiraFields_(settings).join(',')});
+    if(!page||!Array.isArray(page.issues)||page.issues.length!==batch.length)throw new Error('Jira returned an incomplete queue issue batch. No changes made.');
+    page.issues.forEach(function(issue){
+      const key=String(issue.key||'').toUpperCase();if(!byKey[key])throw new Error('Unexpected queue issue '+key+'.');
+      const mappedIssue=jiraMapIssue_(issue,settings);
+      mappedIssue.jira_assignment_group=byKey[key].group;
+      mappedIssue.jira_assignees=JSON.stringify([{name:byKey[key].staff_name,group:byKey[key].group,source:'jira_queue',queue_id:byKey[key].queue_id}]);
+      mapped.push({row:mappedIssue,identity:byKey[key]});
+    });
+  }
+  // All Jira requests succeeded. Only now modify the SitePulse spreadsheet.
+  return transaction_(function(target){
+    requireRole_(target,['admin'],sessionToken);
+    const old=rows_(target,'Tickets'),sheet=target.getSheetByName('Tickets');
+    const indexed=Object.fromEntries(old.map(function(t){return [String(t.jira_ticket_no||'').toUpperCase(),t];}));
+    const seen=new Set(),newRows=[];
+    let created=0,updated=0,linked=0,manualPreserved=0,clearedOld=0;
+    mapped.forEach(function(item){
+      const t=item.row,key=String(t.jira_ticket_no).toUpperCase();seen.add(key);
+      const previous=indexed[key];
+      const manual=previous&&previous.assigned_supervisor_id&&previous.assigned_by&&['jira','jira_queue'].indexOf(String(previous.assigned_by))<0;
+      const value=Object.assign({},previous||{},t,{id:previous?previous.id:newId_(),_row:previous?previous._row:undefined});
+      if(manual){value.assigned_supervisor_id=previous.assigned_supervisor_id;value.assigned_by=previous.assigned_by;manualPreserved++;}
+      else {value.assigned_supervisor_id=item.identity.staff_id;value.assigned_by='jira_queue';value.assignment_status='assigned';value.assigned_at=new Date().toISOString();linked++;}
+      if(previous){write_(target,'Tickets',value);updated++;}
+      else {newRows.push(value);created++;}
+    });
+    if(newRows.length){const values=newRows.map(function(t){return TABLES.Tickets.map(function(k){return t[k]||'';});});sheet.getRange(sheet.getLastRow()+1,1,values.length,TABLES.Tickets.length).setValues(values);}
+    const scannedIds=new Set(plan.queues.map(function(q){return q.staff_id;}));
+    old.forEach(function(t){
+      const owner=String(t.assigned_supervisor_id||'');
+      const automatic=['jira','jira_queue',''].indexOf(String(t.assigned_by||''))>=0;
+      if(owner&&scannedIds.has(owner)&&automatic&&!seen.has(String(t.jira_ticket_no||'').toUpperCase())){
+        t.assigned_supervisor_id='';t.assigned_by='';t.assignment_status='';t.jira_assignment_group='';write_(target,'Tickets',t);clearedOld++;
+      }
+    });
+    return {queues:plan.queues.length,created:created,updated:updated,linked:linked,clearedOld:clearedOld,manualPreserved:manualPreserved,conflicts:Array.from(conflicts),
+      counts:plan.queues.map(function(q){return {supervisor:q.staff_name,queue:q.name,expected:q.count,queueId:q.id};}),
+      note:'SitePulse only. Assignments follow verified Jira '+plan.source+' membership rather than all CIVIL tickets. Jira itself was not modified.'};
+  });
+}
+
 function setSupervisorPriorities(sessionToken,supervisorId,entries){
   return transaction_(function(ss){
     requireRole_(ss,['admin'],sessionToken);
@@ -2016,7 +2191,7 @@ function installSessionCleanup() {
 
 /**
  * SitePulse decoupled JSON RPC + FCM HTTP v1 integration.
- * Merged into Code.gs in this distribution. Never put these secrets in Angular.
+ * Merged into Code.gs in this distribution. Never put these secrets in frontend files.
  * Script properties required for push: FCM_PROJECT_ID, FCM_SERVICE_ACCOUNT_JSON, PUSH_APP_URL.
  * Existing Google Sheets and authentication remain authoritative.
  */
@@ -2031,7 +2206,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'deleteReportingWorkbookRow','insertReportingWorkbookColumn','deleteReportingWorkbookColumn',
   'seedCspDirectory','getDirectory','saveDirectoryCell','addDirectoryRow',
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
-  'saveTicketLead','syncCspRoster','setTicketPriority','setSupervisorPriorities','linkJiraAssignedTickets','listCivilTickets',
+  'saveTicketLead','syncCspRoster','setTicketPriority','setSupervisorPriorities','linkJiraAssignedTickets','listCivilTickets','previewJiraSupervisorQueues','syncJiraSupervisorQueues',
   'localizeRevision','seedLegacyCspItems',
   'registerPushToken','unregisterPushToken','sendPushTest','saveMenuLabels',
   'getLiveUpdates','addItemRate','saveMyProfile','requestProfileEmailChange','confirmProfileEmailChange',
@@ -2051,7 +2226,7 @@ function doPost(e) {
       listJiraQueueIssues, getReportingWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
       addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority, setSupervisorPriorities, linkJiraAssignedTickets,
-      listCivilTickets, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
+      listCivilTickets, previewJiraSupervisorQueues, syncJiraSupervisorQueues, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,
       sendPushTest, saveMenuLabels, getLiveUpdates,addItemRate,
       saveMyProfile,requestProfileEmailChange,confirmProfileEmailChange,renameReportingWorkbookColumn,importScreenshotStaffProfiles,
       

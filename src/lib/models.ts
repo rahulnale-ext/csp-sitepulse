@@ -5,7 +5,7 @@ export interface Staff {id:string;role:Role;name:string;email:string;manager_id?
 export interface Ticket {
   id:string;jira_ticket_no:string;summary:string;location:string;status:string;department?:string;project_key?:string;
   sub_department?:string;engineer_name?:string;assigned_supervisor_id?:string;assignment_status?:string;
-  lead_id?:string;priority_sequence?:number|string;created?:string;contact_number?:string;request_type?:string;
+  lead_id?:string;assigned_by?:string;priority_sequence?:number|string;created?:string;contact_number?:string;request_type?:string;
   sub_request_type?:string;design_needed?:string;reporter?:string;jira_assignee?:string;jira_assignees?:string;jira_assignment_group?:string;
   issue_links_json?:string;budget_details?:string;[key:string]:unknown;
 }

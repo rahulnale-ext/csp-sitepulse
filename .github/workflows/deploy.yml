@@ -1,23 +1,37 @@
-name: Publish CSP SitePulse
-on: {push: {branches: [main]}, workflow_dispatch: {}}
-permissions: {contents: read, pages: write, id-token: write}
-concurrency: {group: pages, cancel-in-progress: true}
+name: Publish CSP SitePulse React
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - run: npm install --no-audit --no-fund
-      - name: Build with repository subpath
-        run: npx ng build --configuration production --base-href "/${{ github.event.repository.name }}/"
+        with:
+          node-version: '22'
+      - name: Install React dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build React website
+        run: npm run build
+      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
-        with: {path: dist/csp-sitepulse/browser}
+        with:
+          path: dist
   deploy:
-    needs: build
-    environment: {name: github-pages, url: '${{ steps.deployment.outputs.page_url }}'}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    needs: build
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4

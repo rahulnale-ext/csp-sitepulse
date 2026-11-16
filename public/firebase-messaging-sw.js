@@ -1,5 +1,5 @@
 /* Single PWA + FCM worker: one registration controls this app's scope. */
-const CACHE='csp-sitepulse-shell-v2';
+const CACHE='csp-sitepulse-shell-v6';
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(c=>c.addAll(['./','./index.html','./isha-logo.png'])).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});
 self.addEventListener('fetch',event=>{
