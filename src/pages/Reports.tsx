@@ -23,10 +23,10 @@ export default function Reports(){
   const isApplied=Boolean(appliedDigest && appliedDigest===draftDigest && text.trim());
   const historyReports=data.reports.filter(r=>history==='all'||r.status===history);
   const resById=(id:string)=>data.items.find(i=>i.id===id);
-  function showTemplate(){if(!selectedTicket){notify('Choose an assigned ticket first.','error');return;}
+  const showTemplate = () => {if(!selectedTicket){notify('Choose an assigned ticket first.','error');return;}
     setText(printableReport({ticket:selectedTicket,staff:data.user,workDate:form.getValues('work_date'),workDone:form.getValues('work_done'),workRows:form.getValues('workRows'),lines:form.getValues('lines') as ReportLine[],items:data.items,status:form.getValues('completion_status')}));setAppliedDigest('');setVerified(false);
-  }
-  function applyText(){if(!selectedTicket){notify('Choose a ticket.','error');return;}
+  };
+  const applyText = () => {if(!selectedTicket){notify('Choose a ticket.','error');return;}
     try{const decoded=parseDailyReport(text,selectedTicket,data.items);
       const prior=form.getValues('lines');
       form.setValue('work_done',decoded.work_done);
@@ -36,7 +36,7 @@ export default function Reports(){
       const current=form.getValues();setAppliedDigest(JSON.stringify(current));setVerified(false);
       notify('Report text applied. Verify quantities and rates before submitting.','success');
     }catch(error){notify(error instanceof Error?error.message:'Invalid report format.','error');}
-  }
+  };
   function addLine(){if(!selectedItem||!(Number(itemQty)>0)){notify('Choose an item and a positive quantity.','error');return;}
     if(actualRate!==''&&(!rateNote.trim()||Number(actualRate)<0)){notify('For an actual rate, enter a valid price and vendor/receipt reference.','error');return;}
     resources.append({item_id:selectedItem,quantity:Number(itemQty),rate_id:selectedRate||undefined,rate_mode:actualRate!==''?'actual':'catalog',actual_rate:actualRate!==''?Number(actualRate):undefined,rate_note:rateNote});
