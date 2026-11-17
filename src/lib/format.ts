@@ -28,11 +28,10 @@ export function printableReport({ticket,staff,workDate,workDone,workRows,lines,i
 export function parseDailyReport(text:string,ticket:Ticket,items:Resource[]){
   const src=text.replace(/\r/g,'').trim();
   if(!src.startsWith('DAILY SITE REPORT\n')||!src.includes('Ticket No: '+ticket.jira_ticket_no))throw new Error('Paste a full DAILY SITE REPORT for the selected ticket.');
-  const work=src.match(/Work Done:\s*\n([\s\S]*?)\n\s*Work Quantities\b/);
+  const work=src.match(/Work Done:\s*\n([\s\S]*?)\n\s*(?:Work Quantities|Labours)\b/);
   if(!work||!work[1].trim()||work[1].trim()==='Not Applicable')throw new Error('Enter the work description under Work Done.');
   const block=src.match(/Work Quantities\s*\n([\s\S]*?)\n\s*Labours\b/);
-  if(!block)throw new Error('Keep Work Quantities and Labours headings in the report.');
-  const workRows=block[1].split('\n').map(x=>x.trim()).filter(Boolean).map(line=>{
+  const workRows=(block?block[1]:'').split('\n').map(x=>x.trim()).filter(Boolean).map(line=>{
     const m=line.match(/^(.+?):\s*(\d+(?:\.\d+)?)\s+(.+)$/);
     if(!m||Number(m[2])<=0)throw new Error('Check work quantity: '+line);
     return {description:m[1],quantity:Number(m[2]),unit:m[3]};
@@ -57,3 +56,12 @@ export function parseDailyReport(text:string,ticket:Ticket,items:Resource[]){
   if(!['completed','partially completed','in progress','not started'].includes(state))throw new Error('Choose a valid Work Completion Status.');
   return {work_done:work[1].trim(),workRows,lines,completion_status:state};
 }
+
+/** Preserve the effective calendar date only, including Sheets UTC date serialization. */
+export function effectiveISODate(value:unknown):string {
+  const raw=String(value||'').trim(); if(!raw)return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(raw))return raw;
+  const d=new Date(raw); if(!Number.isFinite(d.getTime()))return raw.slice(0,10);
+  return new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
+}
+export function formatEffectiveDate(value:unknown):string {const d=effectiveISODate(value);return /^\d{4}-\d{2}-\d{2}$/.test(d)?d.slice(8,10)+'-'+d.slice(5,7)+'-'+d.slice(0,4):d||'-';}

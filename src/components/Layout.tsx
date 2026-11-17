@@ -6,6 +6,7 @@ import {LANGUAGES,NAV,tr} from '../lib/i18n';
 import type {Section,Notice} from '../lib/models';
 import {api} from '../lib/api';
 import {enablePush} from '../lib/push';
+import WhatsAppLauncher from './WhatsAppLauncher';
 
 const icons:Record<string,React.ComponentType<{size?:number;strokeWidth?:number}>>={overview:Home,tickets:ClipboardList,reports:BookOpen,review:CheckCircle2,team:Users,inventory:HardHat,jira:FolderKanban,workbook:LayoutGrid,settings:Settings2};
 const routes:Record<string,string>={overview:'/overview',tickets:'/tickets',reports:'/reports',review:'/review',team:'/people',inventory:'/materials',jira:'/jira',workbook:'/workbook',settings:'/settings'};
@@ -40,7 +41,7 @@ export default function Layout(){
     <div className="workspace">
       {mobile&&<button className="mobile-shade" aria-label="Close menu" onClick={()=>setMobile(false)}/>}
       <aside className={'sidebar '+(mobile?'mobile-open':'')}>
-        <button type="button" className="brand-lockup" onClick={()=>navigate('/overview')} aria-label="CSP home">
+        <button type="button" className="brand-lockup" onClick={()=>navigate(data.user.role==='supervisor'?'/reports':'/overview')} aria-label="CSP home">
           <img src={logo} alt="Isha"/><span className="brand-text"><b>CSP <em>SitePulse</em></b><small>FIELD OPERATIONS</small></span>
         </button>
         <div className="menu-label">{tr(lang,'navigation')}</div>
@@ -72,5 +73,6 @@ export default function Layout(){
         </div>
       </div>
     </div>
+    <WhatsAppLauncher/>
   </div>;
 }

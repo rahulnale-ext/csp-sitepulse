@@ -1,4 +1,4 @@
-# CSP SitePulse V6 - React frontend
+# CSP SitePulse V7 - React frontend
 
 This is a React/Vite/TypeScript replacement for the earlier Angular user interface. It retains the Isha-inspired visual language and the existing Google Apps Script + Google Sheets + Cloudflare Worker backend. It includes React Router (hash routing for GitHub Pages), React Hook Form, fixed pop-up alerts, responsive navigation and a compact CIVIL ticket table.
 
@@ -25,7 +25,27 @@ Supported display-name identity aliases include: Raju/Raju venkatesh, Balakrishn
 
 The numbers are **examples only**, not real filter IDs. Use the exact approved Jira saved-filter IDs, shared with the Jira API account. Accepted `group` values are `maintenance`, `new_works`, `new_projects`, `verified_filter`. The backend verifies each filter exists, checks CIVIL ticket keys, previews counts, then only links after explicit Admin synchronization. Do not configure this property until genuine filter IDs are known.
 
-The currently visible Jira counts cannot be promised to match until the live Jira filter definitions and status restrictions are verified. Incorrect/broad historical assignments are deliberately kept out of supervisor counts in V6.
+The currently visible Jira counts cannot be promised to match until the live Jira filter definitions and status restrictions are verified. Incorrect/broad historical assignments remain excluded from verified supervisor counts in V7.
+
+## V7 interface and reporting changes
+
+- The mobile top bar stays fixed while the page scrolls; all form and table widths are contained within responsive panels. Materials rate dates show only `dd-mm-yyyy` (India-local calendar day).
+- The supervisor navigation contains Daily Reports and Settings only. Supervisors paste a complete DAILY SITE REPORT into a read-only box; no typing or direct editing is allowed. The Paste report button is available in browsers with clipboard permissions; keyboard paste is also handled when supported.
+- Work quantities and catalog resource quantities are structured controls after the paste box. The submitted record is a freshly normalized report with those verified values. The original pasted box remains read-only for supervisors.
+- The Jira Desk uses horizontal tabs for queues. The previous broad CIVIL history diagnostic panel is no longer shown.
+- WhatsApp is a floating, external click-to-chat contact picker. Admin/Lead can select active users with stored numbers. Supervisors can see administrators and assigned leads only; contacts are filtered by the backend. Clicking a person opens WhatsApp but never sends a message automatically. Google Chat shortcuts were removed.
+- Once a Lead approves a report, the backend also inserts a snapshot into the **Approved Reports** tab in the *existing reporting Workbook* (not the Operations spreadsheet). This preserves report IDs, costs and line quantities. Exports are idempotent. If a Workbook write fails, the report still becomes approved in Operations; Admin should use **Workbook > Sync approved reports** to catch up. This command also backfills older approvals.
+- Firebase Cloud Messaging remains enabled for notifications. No Firestore chat service is used.
+
+## Updating an existing installation
+
+1. Back up your current GitHub repository, Apps Script `Code.gs`, and Google Sheets.
+2. Extract the V7 update-only ZIP into the **existing** repository folder, replacing matching files. Keep `src/app/environment.ts` unchanged.
+3. Independently replace Apps Script `Code.gs` with `backend/Code.gs`, save, then **Deploy > Manage deployments > Edit > New version > Deploy**. Keep the original Web app URL and Script Properties.
+4. Commit and push the website changes in GitHub Desktop. Confirm both GitHub Actions **build** and **deploy** succeed.
+5. Test mobile navigation, Materials rate dates, supervisor report paste, role-scoped WhatsApp contacts, and lead report approval. Admin can then use Workbook > Sync approved reports.
+
+The production React build, real device behavior and live Workbook exports have not been independently verified in this environment. Test on non-sensitive records first.
 
 ## Development and publishing
 

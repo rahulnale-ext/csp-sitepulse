@@ -29,7 +29,7 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 function doGet() {
   // This deployment is backend-only. Angular is served by a separate HTTPS host.
   return ContentService.createTextOutput(JSON.stringify({
-    service:'CSP Data Manager API',status:'ready',frontend:'separately hosted Angular app'
+    service:'CSP Data Manager API',status:'ready',frontend:'separately hosted React app'
   })).setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -423,6 +423,18 @@ function getBootstrap(sessionToken) {
       })() : [],
     notifications: notificationRows_(ss, user.id),
     contacts: rows_(ss,'Users').filter(function(u){return u.email&&String(u.id)!==String(user.id)&&String(u.account_status||'active')==='active';}).map(function(u){return {id:u.id,name:u.name,role:u.role};}),
+    whatsappContacts: (function(){
+      const leadIds=new Set([String(user.manager_id||''),String(user.acting_lead_id||'')]);
+      if(role==='supervisor'){
+        rows_(ss,'Lead_Rules').filter(function(r){return String(r.supervisor_id)===String(user.id)&&String(r.active||'true')!=='false';}).forEach(function(r){leadIds.add(String(r.lead_id||''));});
+        rows_(ss,'Tickets').filter(function(t){return String(t.assigned_supervisor_id)===String(user.id);}).forEach(function(t){leadIds.add(String(t.lead_id||''));});
+      }
+      return rows_(ss,'Users').filter(function(u){
+      if(String(u.id)===String(user.id) || String(u.account_status||'active')!=='active' || !u.mobile_number) return false;
+      if(role==='admin'||role==='lead') return true;
+      return u.role==='admin'||(u.role==='lead' && leadIds.has(String(u.id)));
+    }).map(function(u){return {id:u.id,name:u.name,role:u.role,mobile_number:u.mobile_number};});
+    })(),
     jiraReady: role === 'admin' && jiraConfigured_(props),
     reportingWorkbookReady:!!props.getProperty('REPORTING_WORKBOOK_ID'),
     jiraBaseUrl: /^https:\/\/[a-z0-9.-]+(?::443)?$/i.test(jiraHost) ? jiraHost : '',
@@ -842,6 +854,53 @@ function reviseReport(sessionToken,reportId,payload) {
     return {ok:true};
   });
 }
+/** Approval-only export to a dedicated tab of the EXISTING reporting workbook.
+ * Immutable report ID provides idempotency; manually edited source tabs are untouched.
+ * A failed export is recoverable by syncApprovedReportsToWorkbook() from Admin > Workbook. */
+const CSP_APPROVED_HEADERS=['Report ID','Approved At','Work Date','Ticket','Supervisor','Supervisor Email','Project Location','Work Done','DAILY SITE REPORT','Work Quantities JSON','Resource Lines JSON','Labour Total (INR)','Materials Total (INR)','Equipment Total (INR)','Other Total (INR)','Grand Total (INR)','Approved By','Approval Status'];
+function syncApprovedReportToWorkbook_(ss,report,lines,supervisor,approver){
+  if(String(report.status)!=='approved') throw new Error('Only approved reports can enter the workbook.');
+  const workbookId=String(PropertiesService.getScriptProperties().getProperty('REPORTING_WORKBOOK_ID')||'');
+  if(!workbookId)throw new Error('REPORTING_WORKBOOK_ID is not configured. Run setupProject().');
+  const book=SpreadsheetApp.openById(workbookId);
+  let tab=book.getSheetByName('Approved Reports');
+  if(!tab){tab=book.insertSheet('Approved Reports');tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setValues([CSP_APPROVED_HEADERS]);
+    tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setBackground('#234b44').setFontColor('#fff').setFontWeight('bold');
+    tab.setFrozenRows(1);tab.setColumnWidths(1,CSP_APPROVED_HEADERS.length,150);tab.setColumnWidth(9,420);}
+  // Preserve the existing approved row if repeated by a reconciliation run.
+  const n=tab.getLastRow();
+  if(n>1 && tab.getRange(2,1,n-1,1).getValues().some(function(row){return String(row[0])===String(report.id);}))return {alreadyPresent:true};
+  const masters=Object.fromEntries(rows_(ss,'Master_Items').map(function(x){return [String(x.id),x];}));
+  const sums={labour:0,material:0,machine:0,other:0};
+  const items=lines.map(function(line){
+    const master=masters[String(line.item_id)]||{};const q=Number(line.quantity)||0,p=Number(line.locked_price)||0;
+    const kind=['labour','material','machine','other'].includes(String(master.type))?String(master.type):'other';
+    sums[kind]+=q*p;
+    return {name:String(master.name||'Archived item'),category:kind,quantity:q,unit:String(line.rate_unit||''),lockedPrice:p,subtotal:Math.round(q*p*100)/100,rateDate:String(line.rate_date||'')};
+  });
+  const users=peopleById_(ss);const sup=supervisor||users[String(report.supervisor_id)]||{};
+  const ticket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(report.ticket_id);})||{};
+  const lead=approver||users[String(report.approver_id)]||{};
+  const clean=function(v){const text=String(v===undefined||v===null?'':v).slice(0,30000);return /^[=+\-@\t\r]/.test(text)?"'"+text:text;};
+  const total=sums.labour+sums.material+sums.machine+sums.other;
+  const row=[String(report.id),new Date().toISOString(),String(report.work_date||''),clean(ticket.jira_ticket_no||''),clean(sup.name||''),clean(sup.email||''),clean(ticket.location||''),clean(report.work_done||''),clean(report.daily_report_text||''),clean(report.work_quantities_json||'[]'),clean(JSON.stringify(items)),sums.labour,sums.material,sums.machine,sums.other,total,clean(lead.name||''),'Approved'];
+  // If a report is larger than one cell, fail safely; Admin can reconcile after fixing.
+  if(row.some(function(v){return typeof v==='string'&&v.length>49000;}))throw new Error('Report too long for a workbook cell.');
+  tab.getRange(n+1,1,1,CSP_APPROVED_HEADERS.length).setValues([row]);
+  return {created:true};
+}
+/** Idempotent recovery for previously approved reports and partial export failures. */
+function syncApprovedReportsToWorkbook(sessionToken){
+  return transaction_(function(ss){requireRole_(ss,['admin'],sessionToken);
+    const lines=rows_(ss,'Report_Line_Items'),users=peopleById_(ss);let added=0,existing=0;const errors=[];
+    rows_(ss,'Reports').filter(function(r){return String(r.status)==='approved';}).forEach(function(r){
+      try{const status=syncApprovedReportToWorkbook_(ss,r,lines.filter(function(l){return String(l.report_id)===String(r.id);}),users[String(r.supervisor_id)],users[String(r.approver_id)]);
+        if(status.alreadyPresent)existing++;else added++;
+      }catch(e){errors.push(String(r.id)+': '+String(e.message||e));}
+    });return {added:added,existing:existing,errors:errors.slice(0,20),errorCount:errors.length};
+  });
+}
+
 function reviewReport(sessionToken,reportId,action,edits) {
   return transaction_(function(ss) {
     const lead=requireRole_(ss,['lead'],sessionToken);
@@ -866,9 +925,14 @@ function reviewReport(sessionToken,reportId,action,edits) {
       }
     }
     report.status=decision;write_(ss,'Reports',report);
+    let workbookSynced=false;
+    if(decision==='approved'){
+      try{syncApprovedReportToWorkbook_(ss,report,lines,sup,lead);workbookSynced=true;}
+      catch(e){Logger.log('Approved report '+report.id+' pending Workbook sync: '+String(e.message||e));}
+    }
     notify_(ss,sup.id,lead.id,'report_'+decision,'Report '+decision,
       'Your report was '+decision+' by '+lead.name+'.','report',report.id);
-    return {id:report.id,status:decision,amount_of_work:Number(report.amount_of_work)};
+    return {id:report.id,status:decision,amount_of_work:Number(report.amount_of_work),workbook_synced:workbookSynced};
   });
 }
 
@@ -2202,7 +2266,7 @@ const CSP_PUBLIC_RPC_METHODS = Object.freeze([
   'requestRevision','reviseReport','reviewReport','adminUpdateReport',
   'listJiraProjects','syncJiraTickets','fetchJiraTicketByKey','testJiraConnection',
   'listJiraServiceDesks','listJiraQueues','listJiraQueueIssues',
-  'getReportingWorkbook','editReportingWorkbookCell','insertReportingWorkbookRow',
+  'getReportingWorkbook','syncApprovedReportsToWorkbook','editReportingWorkbookCell','insertReportingWorkbookRow',
   'deleteReportingWorkbookRow','insertReportingWorkbookColumn','deleteReportingWorkbookColumn',
   'seedCspDirectory','getDirectory','saveDirectoryCell','addDirectoryRow',
   'deleteDirectoryRow','addDirectoryColumn','saveLeadRule','deleteLeadRule',
@@ -2223,7 +2287,7 @@ function doPost(e) {
       deleteMasterItem, saveUser, deleteUser, listNotifications, markNotificationRead, assignTicket,
       returnTicket, submitReport, requestRevision, reviseReport, reviewReport, adminUpdateReport,
       listJiraProjects, syncJiraTickets, fetchJiraTicketByKey, testJiraConnection, listJiraServiceDesks, listJiraQueues,
-      listJiraQueueIssues, getReportingWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
+      listJiraQueueIssues, getReportingWorkbook, syncApprovedReportsToWorkbook, editReportingWorkbookCell, insertReportingWorkbookRow, deleteReportingWorkbookRow, insertReportingWorkbookColumn,
       deleteReportingWorkbookColumn, seedCspDirectory, getDirectory, saveDirectoryCell, addDirectoryRow, deleteDirectoryRow,
       addDirectoryColumn, saveLeadRule, deleteLeadRule, saveTicketLead, syncCspRoster, setTicketPriority, setSupervisorPriorities, linkJiraAssignedTickets,
       listCivilTickets, previewJiraSupervisorQueues, syncJiraSupervisorQueues, localizeRevision, seedLegacyCspItems, registerPushToken, unregisterPushToken,

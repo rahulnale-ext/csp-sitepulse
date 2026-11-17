@@ -6,12 +6,10 @@ import {LANGUAGES,NAV,tr} from '../lib/i18n';
 import type {Section,Staff} from '../lib/models';
 export default function Settings(){
   const {data,mutation,request,busy,notify,signOut,lang,setLang}=useSite();const navigate=useNavigate();
-  const [emailCode,setEmailCode]=useState(''),[emailPending,setEmailPending]=useState(false),[labels,setLabels]=useState<Partial<Record<Section,string>>>({}),[phone,setPhone]=useState('');
+  const [emailCode,setEmailCode]=useState(''),[emailPending,setEmailPending]=useState(false),[labels,setLabels]=useState<Partial<Record<Section,string>>>({});
   const form=useForm<Partial<Staff>>({defaultValues:{}});
   useEffect(()=>{if(data){form.reset({...data.user});setLabels({...data.menuLabels});}},[data?.user.id]);
   if(!data)return null;
-  const phoneDigits=phone.replace(/\D/g,'');const whatsappDigits=phoneDigits.length===10?'91'+phoneDigits:phoneDigits;
-  const whatsapp=whatsappDigits.length>=11&&whatsappDigits.length<=15?'https://wa.me/'+whatsappDigits:'';
   async function saveProfile(values:Partial<Staff>){if((values.email||'').toLowerCase()!==data?.user.email.toLowerCase()){notify('Verify the new email address before saving other changes.','error');return;}
     try{await mutation('saveMyProfile',[values],'Profile saved to the operations spreadsheet.');}catch(_){}}
   async function requestNewEmail(){const next=form.getValues('email');if(!next||next===data?.user.email)return;
@@ -33,11 +31,6 @@ export default function Settings(){
     <div className="account-row"><span>Language</span><select value={lang} onChange={e=>setLang(e.target.value as typeof lang)}>{LANGUAGES.map(l=><option value={l.code} key={l.code}>{l.label}</option>)}</select></div>
     <button type="submit" disabled={busy} className="btn primary full">Save profile</button>
   </form><button type="button" className="btn ghost full logout" onClick={()=>void logout()}>Sign out</button></section>
-  <section className="panel edit-form"><p className="eyebrow">FREE EXTERNAL COMMUNICATION</p><h3>Open a chat app</h3><p className="settings-help">Messages remain outside SitePulse. No Firestore database or internal chat is needed.</p>
-    <a className="btn secondary full" target="_blank" rel="noopener noreferrer" href="https://chat.google.com/">Open Google Chat</a>
-    <label className="form-field"><span>WhatsApp number (include country code)</span><input type="tel" value={phone} onChange={e=>setPhone(e.target.value)} placeholder="+91 98765 43210"/></label>
-    {whatsapp?<a className="btn secondary full" href={whatsapp} target="_blank" rel="noopener noreferrer">Open WhatsApp chat</a>:<p className="tiny-muted">Enter a full number to open an external WhatsApp conversation.</p>}
-  </section>
   {data.user.role==='admin'&&<section className="panel edit-form"><p className="eyebrow">WORKSPACE PREFERENCES</p><h3>Rename menu labels</h3><p className="settings-help">Changes will appear for all staff after their next refresh.</p><div className="labels-grid">{NAV.map(n=><label key={n.section} className="form-field"><span>{tr(lang,n.section)}</span><input maxLength={32} value={labels[n.section]||''} placeholder={tr(lang,n.section)} onChange={e=>setLabels(p=>({...p,[n.section]:e.target.value}))}/></label>)}</div><button className="btn primary" disabled={busy} onClick={()=>void saveLabels()}>Save menu names</button></section>}
   </div>;
 }

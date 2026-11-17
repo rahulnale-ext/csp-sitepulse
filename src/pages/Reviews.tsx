@@ -9,7 +9,7 @@ export default function Reviews(){
   const pending=data.reports.filter(r=>r.status==='pending');
   const choose=(r:Report)=>{setSelected(r);setQuantities(Object.fromEntries(r.lines.map(l=>[l.id||'',Number(l.quantity)])));setNote('');};
   async function approve(){if(!selected)return;const edits=selected.lines.map(l=>({id:l.id,quantity:Number(quantities[l.id||''])}));if(edits.some(e=>!Number.isFinite(e.quantity)||e.quantity<0)){notify('Enter valid review quantities.','error');return;}
-    try{await mutation('reviewReport',[selected.id,'approved',edits],'Report approved.');setSelected(null);}catch(_){}}
+    try{const result=await mutation<{workbook_synced?:boolean}>('reviewReport',[selected.id,'approved',edits],'Report approved.');if(result.workbook_synced===false)notify('Report approved, but Workbook export needs Admin > Workbook > Sync approved reports.','error');setSelected(null);}catch(_){}}
   async function requestRevision(){if(!selected||!note.trim()){notify('Enter clear instructions for the supervisor.','error');return;}
     try{await mutation('requestRevision',[selected.id,note.trim()],'Report returned to supervisor for revision.');setSelected(null);}catch(_){}}
   return <div className="fade-in"><section className="panel"><div className="panel-head"><div><p className="eyebrow">LEAD WORKFLOW</p><h3>Reports awaiting approval</h3></div><span className="pill warning">{pending.length} pending</span></div>
