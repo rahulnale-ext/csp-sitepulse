@@ -3,7 +3,7 @@ import {useForm} from 'react-hook-form';
 import {useSite} from '../lib/site-context';
 import type {Role,Staff} from '../lib/models';
 import {cap} from '../lib/format';
-interface PersonForm {id?:string;role:Role;name:string;email:string;manager_id:string;can_supervise:boolean;acting_lead_id:string;mobile_number:string;account_status:'active'|'pending'}
+interface PersonForm {id?:string;role:Role;name:string;email:string;manager_id:string;can_supervise:boolean;acting_lead_id:string;mobile_number:string;birth_date?:string;photo_data?:string;account_status:'active'|'pending'}
 const fresh=():PersonForm=>({role:'supervisor',name:'',email:'',manager_id:'',can_supervise:true,acting_lead_id:'',mobile_number:'',account_status:'pending'});
 export default function People(){
   const {data,mutation,busy,notify}=useSite();const form=useForm<PersonForm>({defaultValues:fresh()});const role=form.watch('role');
@@ -11,7 +11,16 @@ export default function People(){
   if(!data)return null;
   const persons=data.users.filter(u=>[u.name,u.email,u.role].join(' ').toLowerCase().includes(query.toLowerCase()));
   const admins=data.users.filter(u=>u.role==='admin');const leads=data.users.filter(u=>u.role==='lead');
-  const open=(u?:Staff)=>{form.reset(u?{...fresh(),...u,can_supervise:String(u.can_supervise)==='true'}:fresh());setEditing(true);};
+  const open=(u?:Staff)=>{
+    const values:PersonForm=u?{
+      id:u.id,role:u.role,name:u.name,email:u.email||'',
+      manager_id:u.manager_id||'',can_supervise:String(u.can_supervise)==='true',
+      acting_lead_id:u.acting_lead_id||'',mobile_number:u.mobile_number||'',
+      birth_date:u.birth_date||'',photo_data:u.photo_data||'',
+      account_status:u.account_status==='pending'?'pending':'active'
+    }:fresh();
+    form.reset(values);setEditing(true);
+  };
   const save=async(v:PersonForm)=>{
     try{await mutation('saveUser',[v],v.id?'Staff record saved.':'Staff member created.');setEditing(false);}catch(_){}}
   async function remove(u:Staff){if(!window.confirm('Delete this staff record? This may be blocked if they have ticket or report history.'))return;

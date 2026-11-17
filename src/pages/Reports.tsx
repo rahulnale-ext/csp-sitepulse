@@ -15,6 +15,7 @@ export default function Reports(){
   const vals=useWatch({control:form.control});
   const [text,setText]=useState(''),[appliedDigest,setAppliedDigest]=useState(''),[selectedItem,setSelectedItem]=useState(''),[itemQty,setItemQty]=useState(1),[selectedRate,setSelectedRate]=useState(''),[actualRate,setActualRate]=useState(''),[rateNote,setRateNote]=useState(''),[verified,setVerified]=useState(false),[revision,setRevision]=useState<Report|null>(null),[history,setHistory]=useState('all');
   if(!data)return null;
+  const reportData=data;
   const canReport=data.user.role==='supervisor'||data.user.role==='lead'&&String(data.user.can_supervise)==='true';
   const eligible=data.tickets.filter(t=>t.assigned_supervisor_id===data.user.id&&!isClosed(t)&&t.assignment_status!=='returned'&&t.assignment_status!=='completed'&&isVerifiedAssignment(t));
   const selectedTicket=data.tickets.find(t=>t.id===vals.ticket_id);
@@ -23,7 +24,7 @@ export default function Reports(){
   const historyReports=data.reports.filter(r=>history==='all'||r.status===history);
   const resById=(id:string)=>data.items.find(i=>i.id===id);
   function applyText(){if(!selectedTicket){notify('Choose a ticket.','error');return;}
-    try{const decoded=parseDailyReport(text,selectedTicket,data.items);
+    try{const decoded=parseDailyReport(text,selectedTicket,reportData.items);
       const prior=form.getValues('lines');
       form.setValue('work_done',decoded.work_done);
       form.setValue('completion_status',decoded.completion_status);
@@ -41,7 +42,7 @@ export default function Reports(){
   async function submit(){if(!isApplied){notify('Select a ticket, paste a DAILY SITE REPORT and click Apply pasted report.','error');return;}
     if(!verified){notify('Tick the verification box before submitting.','error');return;}
     const v=form.getValues();if(!selectedTicket||!v.work_done.trim()||v.workRows.some(x=>!x.description.trim()||!(Number(x.quantity)>0)||!x.unit.trim())){notify('Verify the ticket, work description and quantities.','error');return;}
-    const canonical=printableReport({ticket:selectedTicket,staff:data.user,workDate:v.work_date,workDone:v.work_done,workRows:v.workRows,lines:v.lines.map(l=>({...l,quantity:Number(l.quantity)})),items:data.items,status:v.completion_status});
+    const canonical=printableReport({ticket:selectedTicket,staff:reportData.user,workDate:v.work_date,workDone:v.work_done,workRows:v.workRows,lines:v.lines.map(l=>({...l,quantity:Number(l.quantity)})),items:reportData.items,status:v.completion_status});
     const payload={ticket_id:v.ticket_id,work_date:v.work_date,work_done:v.work_done,completion_status:v.completion_status,work_measure:0,work_measure_unit:'',source_transcript:'',source_language:'',work_quantities:v.workRows,lines:v.lines.map(l=>({...l,quantity:Number(l.quantity)})),daily_report_text:canonical};
     try{if(revision)await mutation('reviseReport',[revision.id,payload],'Revised report submitted for approval.');else await mutation('submitReport',[payload],'Daily report submitted for approval.');
       form.reset(defaults());setText('');setAppliedDigest('');setVerified(false);setRevision(null);
