@@ -9,7 +9,7 @@ const TABLES = Object.freeze({
   Users: ['id', 'role', 'name', 'email', 'manager_id', 'can_supervise', 'acting_lead_id', 'mobile_number', 'birth_date', 'photo_data', 'account_status'],
   Master_Items: ['id', 'type', 'name', 'current_price', 'quantity', 'rate_unit'],
   Tickets: ['id', 'jira_ticket_no', 'location', 'engineer_name', 'status', 'department', 'project_key', 'sub_department', 'summary', 'assigned_supervisor_id', 'assigned_by', 'assigned_at', 'assignment_status', 'return_reason', 'returned_at', 'jira_assignees', 'priority_sequence', 'budget_details', 'issue_links_json', 'lead_id', 'created', 'contact_number', 'request_type', 'sub_request_type', 'design_needed', 'reporter', 'jira_assignee', 'jira_assignment_group'],
-  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date', 'source_transcript', 'source_language', 'work_quantities_json'],
+  Reports: ['id', 'ticket_id', 'supervisor_id', 'date', 'work_done', 'completion_status', 'amount_of_work', 'status', 'revision_note', 'revision_count', 'approver_id', 'work_measure', 'work_measure_unit', 'daily_report_text', 'work_date', 'source_transcript', 'source_language', 'work_quantities_json', 'approved_at'],
   Report_Line_Items: ['id', 'report_id', 'item_id', 'quantity', 'locked_price', 'rate_unit', 'rate_id', 'rate_date', 'rate_source', 'rate_note'],
   Notifications: ['id', 'recipient_id', 'actor_id', 'type', 'title', 'body', 'target_kind', 'target_id', 'created_at', 'read_at'],
   Push_Subscriptions: ['id', 'user_id', 'token', 'device_label', 'created_at', 'updated_at'],
@@ -72,7 +72,7 @@ function initializeNewProject_() {
 
 /** These column labels match the user's CSP response workbook; no responses are fabricated. */
 const CSP_REPORTING_HEADERS = [
-  'Timestamp','Email Address','AI Report','Supervisor Name','Civil Ticket No','Work Date',
+  'Timestamp','Email Address','Daily Site Report','Supervisor Name','Civil Ticket No','Work Date',
   'Masons','Helpers','FC','Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks',
   'Solid Blocks','Tiles','Other Materials','Tractor','Crane','JCB','Scaffolding',
   'Other Equipment','Status','Completed','Unit','Labour','Material','Equipment','Total'
@@ -854,50 +854,144 @@ function reviseReport(sessionToken,reportId,payload) {
     return {ok:true};
   });
 }
-/** Approval-only export to a dedicated tab of the EXISTING reporting workbook.
- * Immutable report ID provides idempotency; manually edited source tabs are untouched.
- * A failed export is recoverable by syncApprovedReportsToWorkbook() from Admin > Workbook. */
-const CSP_APPROVED_HEADERS=['Report ID','Approved At','Work Date','Ticket','Supervisor','Supervisor Email','Project Location','Work Done','DAILY SITE REPORT','Work Quantities JSON','Resource Lines JSON','Labour Total (INR)','Materials Total (INR)','Equipment Total (INR)','Other Total (INR)','Grand Total (INR)','Approved By','Approval Status'];
-function syncApprovedReportToWorkbook_(ss,report,lines,supervisor,approver){
-  if(String(report.status)!=='approved') throw new Error('Only approved reports can enter the workbook.');
-  const workbookId=String(PropertiesService.getScriptProperties().getProperty('REPORTING_WORKBOOK_ID')||'');
-  if(!workbookId)throw new Error('REPORTING_WORKBOOK_ID is not configured. Run setupProject().');
-  const book=SpreadsheetApp.openById(workbookId);
+/** Write every approved report to BOTH the familiar response sheet and a readable
+ * archive. Never overwrite existing responses; a stable short reference prevents
+ * duplicates when a Lead retries or Admin runs reconciliation. */
+const CSP_APPROVED_HEADERS=['Report ID','Approved Date','Approved Time','Work Date','Ticket','Supervisor','Supervisor Email','Project Location','Work Done','DAILY SITE REPORT','Work Quantities','Resources Used','Labour Total (INR)','Materials Total (INR)','Equipment Total (INR)','Other Total (INR)','Grand Total (INR)','Approved By','Approval Status'];
+function reportRef_(id){return 'R-'+String(id||'').replace(/[^a-zA-Z0-9]/g,'').slice(0,12).toUpperCase();}
+function reportDateParts_(raw){
+  if(!raw)return {date:'',time:''};
+  const d=new Date(raw);
+  if(!Number.isFinite(d.getTime()))return {date:'',time:''};
+  const tz=PropertiesService.getScriptProperties().getProperty('SITE_TIMEZONE')||'Asia/Kolkata';
+  return {date:Utilities.formatDate(d,tz,'dd-MM-yyyy'),time:Utilities.formatDate(d,tz,'HH:mm:ss')};
+}
+function workDateOnly_(value){
+  const v=String(value||'').trim();
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v))return v.slice(8,10)+'-'+v.slice(5,7)+'-'+v.slice(0,4);
+  if(/^\d{2}-\d{2}-\d{4}$/.test(v))return v;
+  return reportDateParts_(v).date;
+}
+function workQuantitiesReadable_(value){
+  let items=[];
+  try{items=typeof value==='string'?JSON.parse(value||'[]'):value||[];}catch(_){return 'Needs review';}
+  if(!Array.isArray(items))return 'Needs review';
+  return items.filter(function(x){return x&&String(x.description||'').trim();}).map(function(x){
+    return String(x.description).trim()+': '+String(x.quantity||0)+' '+String(x.unit||'unit');
+  }).join('; ')||'Not Used';
+}
+function resourceLinesReadable_(value){
+  let items=[];
+  try{items=typeof value==='string'?JSON.parse(value||'[]'):value||[];}catch(_){return 'Needs review';}
+  if(!Array.isArray(items))return 'Needs review';
+  return items.map(function(x){return String(x.name||'Resource')+': '+String(x.quantity||0)+' '+String(x.unit||'unit')+' (INR '+Number(x.lockedPrice||0).toFixed(2)+'/unit)';}).join('; ')||'Not Used';
+}
+function approvedArchive_(book){
   let tab=book.getSheetByName('Approved Reports');
-  if(!tab){tab=book.insertSheet('Approved Reports');tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setValues([CSP_APPROVED_HEADERS]);
-    tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setBackground('#234b44').setFontColor('#fff').setFontWeight('bold');
-    tab.setFrozenRows(1);tab.setColumnWidths(1,CSP_APPROVED_HEADERS.length,150);tab.setColumnWidth(9,420);}
-  // Preserve the existing approved row if repeated by a reconciliation run.
+  if(!tab){tab=book.insertSheet('Approved Reports');}
+  const last=tab.getLastRow();
+  if(last>0){
+    const heads=tab.getRange(1,1,1,Math.max(tab.getLastColumn(),18)).getValues()[0];
+    if(heads[9]==='Work Quantities JSON'||heads[10]==='Resource Lines JSON'){
+      // Back up the legacy app-owned export before a one-time conversion.
+      if(!book.getSheetByName('Approved Reports - original')&&typeof tab.copyTo==='function'){
+        const backup=tab.copyTo(book).setName('Approved Reports - original');
+        if(typeof backup.hideSheet==='function')backup.hideSheet();
+      }
+      const old=last>1?tab.getRange(2,1,last-1,18).getValues():[];
+      const cleanRows=old.map(function(row){
+        // V7 stored the export time, not the actual approval time. Do not present it as an approval stamp.
+        return [reportRef_(row[0]),'','',workDateOnly_(row[2]),row[3],row[4],row[5],row[6],row[7],row[8],workQuantitiesReadable_(row[9]),resourceLinesReadable_(row[10]),row[11],row[12],row[13],row[14],row[15],row[16],row[17]];
+      });
+      if(tab.getMaxColumns()<CSP_APPROVED_HEADERS.length)tab.insertColumnsAfter(tab.getMaxColumns(),CSP_APPROVED_HEADERS.length-tab.getMaxColumns());
+      tab.clearContents();
+      tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setValues([CSP_APPROVED_HEADERS]);
+      if(cleanRows.length)tab.getRange(2,1,cleanRows.length,CSP_APPROVED_HEADERS.length).setValues(cleanRows);
+    }
+  }
+  if(tab.getMaxColumns()<CSP_APPROVED_HEADERS.length)tab.insertColumnsAfter(tab.getMaxColumns(),CSP_APPROVED_HEADERS.length-tab.getMaxColumns());
+  tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setValues([CSP_APPROVED_HEADERS]);
+  tab.getRange(1,1,1,CSP_APPROVED_HEADERS.length).setBackground('#234b44').setFontColor('#fff').setFontWeight('bold');
+  tab.setFrozenRows(1);tab.setColumnWidths(1,CSP_APPROVED_HEADERS.length,140);tab.setColumnWidth(10,400);
+  return tab;
+}
+function archiveHasReport_(tab,ref,fullId){
   const n=tab.getLastRow();
-  if(n>1 && tab.getRange(2,1,n-1,1).getValues().some(function(row){return String(row[0])===String(report.id);}))return {alreadyPresent:true};
+  return n>1&&tab.getRange(2,1,n-1,1).getValues().some(function(r){return String(r[0])===ref||String(r[0])===String(fullId);});
+}
+function syncResponseRow_(book,report,lines,sup,ticket,sums,total,ref){
+  const tab=book.getSheetByName('Form Responses 1');
+  if(!tab)throw new Error('The Form Responses 1 tab is missing. Restore this sheet before syncing.');
+  const required=Math.max(CSP_REPORTING_HEADERS.length,31);
+  if(tab.getMaxColumns()<required)tab.insertColumnsAfter(tab.getMaxColumns(),required-tab.getMaxColumns());
+  const current=tab.getRange(1,1,1,required).getValues()[0];
+  if(current[2]==='AI Report')tab.getRange(1,3).setValue('Daily Site Report');
+  // Additional columns are app-owned: the original 29 response headings remain in place.
+  if(!current[29])tab.getRange(1,30).setValue('Report ID');
+  if(!current[30])tab.getRange(1,31).setValue('Approved Time');
+  const n=tab.getLastRow();
+  if(n>1&&tab.getRange(2,30,n-1,1).getValues().some(function(r){return String(r[0])===ref;}))return false;
+  const qty={};lines.forEach(function(line){
+    const key=String(line.item_name||line.master_name||'').trim().toLowerCase();
+    if(key)qty[key]=(qty[key]||0)+(Number(line.quantity)||0);
+  });
+  const q=function(name){return Number(qty[String(name).toLowerCase()]||0)||'';};
+  const approved=reportDateParts_(report.approved_at);
+  const base=[approved.date,String(sup.email||''),String(report.daily_report_text||report.work_done||''),String(sup.name||''),String(ticket.jira_ticket_no||''),workDateOnly_(report.work_date),
+    q('Masons'),q('Helpers'),q('FC'),q('Cement Bags'),q('M Sand'),q('P Sand'),q('Jelly/Chips'),q('Bricks'),q('Solid Blocks'),q('Tiles'),
+    lines.filter(function(l){return l.item_type==='material'&&!['Cement Bags','M Sand','P Sand','Jelly/Chips','Bricks','Solid Blocks','Tiles'].includes(l.item_name);}).map(function(l){return l.item_name+': '+l.quantity+' '+l.rate_unit;}).join('; '),
+    q('Tractor'),q('Crane'),q('JCB'),q('Scaffolding'),
+    lines.filter(function(l){return l.item_type==='machine'&&!['Tractor','Crane','JCB','Scaffolding'].includes(l.item_name);}).map(function(l){return l.item_name+': '+l.quantity+' '+l.rate_unit;}).join('; '),
+    String(report.completion_status||''),String(report.completion_status||'')==='completed'?'Yes':'No','',sums.labour,sums.material,sums.machine,total];
+  let target=n+1;
+  if(n>=2&&tab.getRange(2,1,1,25).getValues()[0].every(function(v){return v===''||v===null;}))target=2;
+  // Save date-only strings; user descriptions cannot become spreadsheet formulas.
+  const safe=base.map(function(v){return typeof v==='string'&&/^[=+\-@\t\r]/.test(v)?"'"+v:v;});
+  tab.getRange(target,1,1,29).setValues([safe]);
+  tab.getRange(target,30,1,2).setValues([[ref,approved.time]]);
+  tab.getRange(target,1,1,1).setNumberFormat('@');
+  tab.getRange(target,6,1,1).setNumberFormat('@');
+  return true;
+}
+function syncApprovedReportToWorkbook_(ss,report,lines,supervisor,approver){
+  if(String(report.status)!=='approved')throw new Error('Only approved reports can enter the workbook.');
+  const id=String(PropertiesService.getScriptProperties().getProperty('REPORTING_WORKBOOK_ID')||'');
+  if(!id)throw new Error('Reporting Workbook is not configured. Run setupProject().');
+  const book=SpreadsheetApp.openById(id);
+  const tab=approvedArchive_(book);
   const masters=Object.fromEntries(rows_(ss,'Master_Items').map(function(x){return [String(x.id),x];}));
   const sums={labour:0,material:0,machine:0,other:0};
-  const items=lines.map(function(line){
-    const master=masters[String(line.item_id)]||{};const q=Number(line.quantity)||0,p=Number(line.locked_price)||0;
-    const kind=['labour','material','machine','other'].includes(String(master.type))?String(master.type):'other';
-    sums[kind]+=q*p;
-    return {name:String(master.name||'Archived item'),category:kind,quantity:q,unit:String(line.rate_unit||''),lockedPrice:p,subtotal:Math.round(q*p*100)/100,rateDate:String(line.rate_date||'')};
+  const items=lines.map(function(l){
+    const m=masters[String(l.item_id)]||{};const quantity=Number(l.quantity)||0;const price=Number(l.locked_price)||0;
+    const kind=['labour','material','machine','other'].includes(String(m.type))?String(m.type):'other';
+    sums[kind]+=quantity*price;
+    return {name:String(m.name||'Archived resource'),category:kind,quantity:quantity,unit:String(l.rate_unit||m.rate_unit||'unit'),lockedPrice:price,subtotal:quantity*price};
   });
   const users=peopleById_(ss);const sup=supervisor||users[String(report.supervisor_id)]||{};
   const ticket=rows_(ss,'Tickets').find(function(t){return String(t.id)===String(report.ticket_id);})||{};
   const lead=approver||users[String(report.approver_id)]||{};
+  const ref=reportRef_(report.id),approved=reportDateParts_(report.approved_at);
   const clean=function(v){const text=String(v===undefined||v===null?'':v).slice(0,30000);return /^[=+\-@\t\r]/.test(text)?"'"+text:text;};
   const total=sums.labour+sums.material+sums.machine+sums.other;
-  const row=[String(report.id),new Date().toISOString(),String(report.work_date||''),clean(ticket.jira_ticket_no||''),clean(sup.name||''),clean(sup.email||''),clean(ticket.location||''),clean(report.work_done||''),clean(report.daily_report_text||''),clean(report.work_quantities_json||'[]'),clean(JSON.stringify(items)),sums.labour,sums.material,sums.machine,sums.other,total,clean(lead.name||''),'Approved'];
-  // If a report is larger than one cell, fail safely; Admin can reconcile after fixing.
+  const row=[ref,approved.date,approved.time,workDateOnly_(report.work_date),clean(ticket.jira_ticket_no||''),clean(sup.name||''),clean(sup.email||''),clean(ticket.location||''),clean(report.work_done||''),clean(report.daily_report_text||''),clean(workQuantitiesReadable_(report.work_quantities_json)),clean(resourceLinesReadable_(items)),sums.labour,sums.material,sums.machine,sums.other,total,clean(lead.name||''),'Approved'];
   if(row.some(function(v){return typeof v==='string'&&v.length>49000;}))throw new Error('Report too long for a workbook cell.');
-  tab.getRange(n+1,1,1,CSP_APPROVED_HEADERS.length).setValues([row]);
-  return {created:true};
+  const already=archiveHasReport_(tab,ref,report.id);
+  if(!already)tab.getRange(tab.getLastRow()+1,1,1,CSP_APPROVED_HEADERS.length).setValues([row]);
+  // If one sheet succeeds and the other fails, retrying fills only the missing sheet.
+  const responseAdded=syncResponseRow_(book,report,items.map(function(x){return {item_name:x.name,item_type:x.category,quantity:x.quantity,rate_unit:x.unit};}),sup,ticket,sums,total,ref);
+  return {created:!already||responseAdded,alreadyPresent:already&&!responseAdded,archiveAdded:!already,responseAdded:responseAdded};
 }
-/** Idempotent recovery for previously approved reports and partial export failures. */
+/** Recovery of previously approved records, including incomplete two-sheet exports. */
 function syncApprovedReportsToWorkbook(sessionToken){
   return transaction_(function(ss){requireRole_(ss,['admin'],sessionToken);
-    const lines=rows_(ss,'Report_Line_Items'),users=peopleById_(ss);let added=0,existing=0;const errors=[];
+    const lines=rows_(ss,'Report_Line_Items'),users=peopleById_(ss);let added=0,existing=0;let archiveAdded=0,responseAdded=0;const errors=[];
     rows_(ss,'Reports').filter(function(r){return String(r.status)==='approved';}).forEach(function(r){
-      try{const status=syncApprovedReportToWorkbook_(ss,r,lines.filter(function(l){return String(l.report_id)===String(r.id);}),users[String(r.supervisor_id)],users[String(r.approver_id)]);
-        if(status.alreadyPresent)existing++;else added++;
-      }catch(e){errors.push(String(r.id)+': '+String(e.message||e));}
-    });return {added:added,existing:existing,errors:errors.slice(0,20),errorCount:errors.length};
+      try{const result=syncApprovedReportToWorkbook_(ss,r,lines.filter(function(l){return String(l.report_id)===String(r.id);}),users[String(r.supervisor_id)],users[String(r.approver_id)]);
+        if(result.created)added++;else existing++;
+        if(result.archiveAdded)archiveAdded++;if(result.responseAdded)responseAdded++;
+      }catch(e){errors.push('Report '+reportRef_(r.id)+': '+String(e.message||e));}
+    });
+    return {added:added,existing:existing,archiveAdded:archiveAdded,responseAdded:responseAdded,errors:errors.slice(0,15),errorCount:errors.length};
   });
 }
 
@@ -924,15 +1018,18 @@ function reviewReport(sessionToken,reportId,action,edits) {
         if (ticket && String(ticket.assigned_supervisor_id)===String(sup.id)) {ticket.assignment_status='completed';write_(ss,'Tickets',ticket);}
       }
     }
-    report.status=decision;write_(ss,'Reports',report);
+    report.status=decision;
+    if(decision==='approved')report.approved_at=new Date().toISOString();
+    write_(ss,'Reports',report);
     let workbookSynced=false;
+    let workbookError='';
     if(decision==='approved'){
       try{syncApprovedReportToWorkbook_(ss,report,lines,sup,lead);workbookSynced=true;}
-      catch(e){Logger.log('Approved report '+report.id+' pending Workbook sync: '+String(e.message||e));}
+      catch(e){workbookError=String(e.message||e);Logger.log('Approved report '+report.id+' pending Workbook sync: '+workbookError);}
     }
     notify_(ss,sup.id,lead.id,'report_'+decision,'Report '+decision,
       'Your report was '+decision+' by '+lead.name+'.','report',report.id);
-    return {id:report.id,status:decision,amount_of_work:Number(report.amount_of_work),workbook_synced:workbookSynced};
+    return {id:report.id,status:decision,amount_of_work:Number(report.amount_of_work),workbook_synced:workbookSynced,workbook_error:workbookError};
   });
 }
 
@@ -1510,7 +1607,7 @@ function listJiraQueueIssues(sessionToken,deskId,queueId,startInput) {
 function reportingWorkbook_() { return ensureReportingWorkbook_(); }
 function getReportingWorkbook(sessionToken,tabName,pageInput,pageSizeInput) {
   requireRole_(db_(),['admin'],sessionToken);
-  const book=reportingWorkbook_();const all=book.getSheets();
+  const book=reportingWorkbook_();const all=book.getSheets().filter(function(sh){return sh.getName()!=='Approved Reports - original';});
   const tab=tabName?book.getSheetByName(String(tabName)):all.find(function(s){return s.getName()==='Form Responses 1';})||all[0];
   if(!tab)throw new Error('Sheet not found.');
   const pagesize=Math.max(10,Math.min(75,Number(pageSizeInput)||35));

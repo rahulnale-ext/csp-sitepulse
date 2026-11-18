@@ -65,3 +65,22 @@ export function effectiveISODate(value:unknown):string {
   return new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
 }
 export function formatEffectiveDate(value:unknown):string {const d=effectiveISODate(value);return /^\d{4}-\d{2}-\d{2}$/.test(d)?d.slice(8,10)+'-'+d.slice(5,7)+'-'+d.slice(0,4):d||'-';}
+
+/** Never expose raw serialized records in the workbook's read-only grid. */
+export function readableWorkbookValue(value:unknown):string {
+  const text=String(value??'');
+  if(!/^\s*[\[{]/.test(text))return text;
+  try {
+    const value=JSON.parse(text) as unknown;
+    if(Array.isArray(value)) {
+      const pieces=value.slice(0,80).map(v=>{
+        if(!v || typeof v!=='object')return String(v);
+        const x=v as Record<string,unknown>;
+        const name=String(x.description||x.name||x.item_name||'Item');
+        return `${name}: ${x.quantity??''} ${x.unit||''}`.trim();
+      });
+      return pieces.join('; ')||'Not Used';
+    }
+    return 'Details available in the original record';
+  }catch {return 'Unformatted record; ask an administrator to check the source.';}
+}

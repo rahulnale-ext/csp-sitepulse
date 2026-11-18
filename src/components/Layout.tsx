@@ -1,6 +1,6 @@
 import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {NavLink,Outlet,useLocation,useNavigate} from 'react-router-dom';
-import {Bell,BookOpen,CheckCircle2,ChevronLeft,ChevronRight,ClipboardList,FolderKanban,HardHat,Home,LayoutGrid,LogOut,Menu,RefreshCcw,Settings2,Users,Warehouse,X,AlertCircle,Info,Check,ExternalLink} from 'lucide-react';
+import {Bell,BookOpen,CheckCircle2,ChevronLeft,ChevronRight,ClipboardList,FolderKanban,HardHat,LayoutGrid,LogOut,Menu,RefreshCcw,Settings2,Users,Warehouse,X,AlertCircle,Info,Check,ExternalLink} from 'lucide-react';
 import {useSite} from '../lib/site-context';
 import {LANGUAGES,NAV,tr} from '../lib/i18n';
 import type {Section,Notice} from '../lib/models';
@@ -8,8 +8,8 @@ import {api} from '../lib/api';
 import {enablePush} from '../lib/push';
 import WhatsAppLauncher from './WhatsAppLauncher';
 
-const icons:Record<string,React.ComponentType<{size?:number;strokeWidth?:number}>>={overview:Home,tickets:ClipboardList,reports:BookOpen,review:CheckCircle2,team:Users,inventory:HardHat,jira:FolderKanban,workbook:LayoutGrid,settings:Settings2};
-const routes:Record<string,string>={overview:'/overview',tickets:'/tickets',reports:'/reports',review:'/review',team:'/people',inventory:'/materials',jira:'/jira',workbook:'/workbook',settings:'/settings'};
+const icons:Record<string,React.ComponentType<{size?:number;strokeWidth?:number}>>={tickets:ClipboardList,reports:BookOpen,review:CheckCircle2,team:Users,inventory:HardHat,workbook:LayoutGrid,settings:Settings2};
+const routes:Record<string,string>={tickets:'/tickets',reports:'/reports',review:'/review',team:'/people',inventory:'/materials',workbook:'/workbook',settings:'/settings'};
 const logo=import.meta.env.BASE_URL+'isha-logo.png';
 
 export function ToastStack(){
@@ -29,7 +29,7 @@ export default function Layout(){
   const bellRef=useRef<HTMLDivElement>(null);
   const navigate=useNavigate();
   const location=useLocation();
-  const section=(Object.entries(routes).find(([,path])=>path===location.pathname)?.[0]||'overview') as Section;
+  const section=(Object.entries(routes).find(([,path])=>path===location.pathname)?.[0]||'tickets') as Section;
   const unread=(data?.notifications||[]).filter(x=>!x.read_at).length;
   const title=useMemo(()=>data?.menuLabels?.[section]||tr(lang,section),[data?.menuLabels,lang,section]);
   useEffect(()=>{setMobile(false);setBellOpen(false);},[location.pathname]);
@@ -41,7 +41,7 @@ export default function Layout(){
     <div className="workspace">
       {mobile&&<button className="mobile-shade" aria-label="Close menu" onClick={()=>setMobile(false)}/>}
       <aside className={'sidebar '+(mobile?'mobile-open':'')}>
-        <button type="button" className="brand-lockup" onClick={()=>navigate(data.user.role==='supervisor'?'/reports':'/overview')} aria-label="CSP home">
+        <button type="button" className="brand-lockup" onClick={()=>navigate(data.user.role==='supervisor'?'/reports':'/tickets')} aria-label="CSP home">
           <img src={logo} alt="Isha"/><span className="brand-text"><b>CSP <em>SitePulse</em></b><small>FIELD OPERATIONS</small></span>
         </button>
         <div className="menu-label">{tr(lang,'navigation')}</div>

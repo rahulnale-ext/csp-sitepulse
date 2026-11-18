@@ -3,6 +3,7 @@ import {AlertTriangle,CheckCircle2,ChevronDown,Filter,RefreshCcw,Search,ShieldCh
 import {useSite} from '../lib/site-context';
 import {cap,formatDate,isClosed,isVerifiedAssignment} from '../lib/format';
 import type {JiraDetail,Staff,Ticket} from '../lib/models';
+import JiraDesk from './JiraDesk';
 
 interface Queue {id:string;name:string;staff_id:string;staff_name:string;count:number;group:string}
 interface QueuePreview {queues:Queue[];unmatchedQueues:{name:string;count:number}[];allQueueCount:number;note:string}
@@ -11,18 +12,18 @@ const PAGE_SIZE=60;
 function sortPriority(a:Ticket,b:Ticket){return Number(a.priority_sequence||999999)-Number(b.priority_sequence||999999)||a.jira_ticket_no.localeCompare(b.jira_ticket_no);}
 export default function Tickets(){
   const {data,notify,request,mutation,busy}=useSite();
-  const [search,setSearch]=useState(''),[status,setStatus]=useState('all'),[person,setPerson]=useState('all'),[group,setGroup]=useState('all'),[location,setLocation]=useState('all'),[date,setDate]=useState(''),[page,setPage]=useState(1),[showUnverified,setShowUnverified]=useState(false);
+  const [search,setSearch]=useState(''),[status,setStatus]=useState('all'),[person,setPerson]=useState('all'),[group,setGroup]=useState('all'),[location,setLocation]=useState('all'),[date,setDate]=useState(''),[page,setPage]=useState(1);
   const [priorityPerson,setPriorityPerson]=useState(''),[priorities,setPriorities]=useState<Record<string,number>>({}),[priorityExpanded,setPriorityExpanded]=useState(false);
   const [preview,setPreview]=useState<QueuePreview|null>(null),[lastSync,setLastSync]=useState<QueueSync|null>(null),[previewBusy,setPreviewBusy]=useState(false);
   const [selected,setSelected]=useState<Ticket|null>(null),[detail,setDetail]=useState<JiraDetail|null>(null),[detailBusy,setDetailBusy]=useState(false);
   const [manualPerson,setManualPerson]=useState('');
+  const [showJiraDesk,setShowJiraDesk]=useState(false);
   if(!data)return null;
   const isAdmin=data.user.role==='admin';
   const supervisors=data.users.filter(u=>u.role==='supervisor'||(u.role==='lead'&&String(u.can_supervise)==='true'));
   const ticketRows=data.tickets.filter(t=>!t.project_key||String(t.project_key).toUpperCase()==='CIVIL');
   const verified=ticketRows.filter(isVerifiedAssignment);
-  const older=ticketRows.length-verified.length;
-  const base=showUnverified&&isAdmin?ticketRows:verified;
+  const base=verified;
   const countsBySupervisor=Object.fromEntries(supervisors.map(u=>[u.id,verified.filter(t=>t.assigned_supervisor_id===u.id).length]));
   const locations=Array.from(new Set(verified.map(t=>String(t.location||'').trim()).filter(Boolean))).sort();
   const rows=base.filter(t=>{
@@ -61,8 +62,9 @@ export default function Tickets(){
     if(!window.confirm('Create a manual SitePulse assignment override? Jira itself will not change.'))return;
     try{await mutation('assignTicket',[selected.id,manualPerson],'Manual SitePulse assignment saved.');setSelected(null);}catch(_){}}
   return <div className="fade-in tickets-page">
+    {isAdmin&&<div className="jira-inside-tickets"><div className="ticket-jira-toggle"><button type="button" className="btn secondary small" onClick={()=>setShowJiraDesk(v=>!v)} aria-expanded={showJiraDesk}>{showJiraDesk?'Hide Jira Desk':'Jira Desk · CIVIL queues'}</button></div>{showJiraDesk&&<JiraDesk/>}</div>}
     {isAdmin&&<section className="queue-sync-strip panel">
-      <div className="queue-sync-text"><ShieldCheck size={17}/><div><strong>Jira supervisor queue matching</strong><small>Only tickets confirmed by CIVIL supervisor queues or approved saved filters are counted as Jira-assigned. Broad CIVIL history is kept separately.</small></div></div>
+      <div className="queue-sync-text"><ShieldCheck size={17}/><div><strong>Jira supervisor queue matching</strong><small>Only tickets confirmed by CIVIL supervisor queues or approved saved filters are counted as Jira-assigned. Unverified tickets are not counted as confirmed supervisor assignments.</small></div></div>
       <div className="button-row"><button type="button" className="btn ghost small" onClick={()=>void previewQueues()} disabled={previewBusy||busy}>{previewBusy?'Checking...':'Preview Jira queues'}</button><button type="button" className="btn primary small" onClick={()=>void syncQueues()} disabled={!preview?.queues.length||previewBusy||busy}>Sync verified queues</button></div>
     </section>}
     {isAdmin&&preview&&<section className="panel queue-preview"><div className="panel-head"><div><p className="eyebrow">LIVE JIRA ASSIGNEE VIEWS - PREVIEW ONLY</p><h3>{preview.queues.length} matching views found</h3></div><button className="btn-icon" onClick={()=>setPreview(null)} aria-label="Close queue preview"><X size={17}/></button></div>
@@ -75,7 +77,6 @@ export default function Tickets(){
     <div className="tickets-layout">
       <aside className="panel ticket-facets"><div className="facet-title">Jira views <small>Local scope</small></div>
         <button className={'facet-item '+(person==='all'?'selected':'')} onClick={()=>{setPerson('all');updatePage();}}>Queue-verified <span className="facet-count">{verified.length}</span></button>
-        {isAdmin&&<button className="facet-item" onClick={()=>{setShowUnverified(x=>!x);updatePage();}}>{showUnverified?'Hide':'Show'} broad CIVIL <span className="facet-count">{older}</span></button>}
         <div className="facet-title with-border">Verified assignees</div>
         {supervisors.map(u=><button key={u.id} className={'facet-item indented '+(person===u.id?'selected':'')} onClick={()=>{setPerson(person===u.id?'all':u.id);updatePage();}}>{u.name}<span className="facet-count">{countsBySupervisor[u.id]||0}</span></button>)}
       </aside>
@@ -94,7 +95,7 @@ export default function Tickets(){
           <select aria-label="Jira group" value={group} onChange={e=>{setGroup(e.target.value);updatePage();}}><option value="all">All Jira groups</option><option value="maintenance">Maintenance</option><option value="new_works">New Works</option><option value="new_projects">New Projects</option><option value="verified_queue">Other verified queues</option></select>
           <select aria-label="IESM Location" value={location} onChange={e=>{setLocation(e.target.value);updatePage();}}><option value="all">All locations</option>{locations.map(x=><option key={x} value={x}>{x}</option>)}</select>
           <input aria-label="Created date" type="date" value={date} onChange={e=>{setDate(e.target.value);updatePage();}}/>
-          <button type="button" className="btn ghost small reset-filter" onClick={()=>{setSearch('');setStatus('all');setPerson('all');setGroup('all');setLocation('all');setDate('');setShowUnverified(false);setPage(1);}}><X size={12}/>Reset</button>
+          <button type="button" className="btn ghost small reset-filter" onClick={()=>{setSearch('');setStatus('all');setPerson('all');setGroup('all');setLocation('all');setDate('');setPage(1);}}><X size={12}/>Reset</button>
           <b className="toolbar-count">{rows.length} tickets</b>
         </div>
         <div className="panel compact-table-wrap"><div className="compact-scroll"><table className="compact-ticket-table"><colgroup><col style={{width:'7%'}}/><col style={{width:'3%'}}/><col style={{width:'6.5%'}}/><col style={{width:'19%'}}/><col style={{width:'8%'}}/><col style={{width:'12%'}}/><col style={{width:'8%'}}/><col style={{width:'9%'}}/><col style={{width:'9%'}}/><col style={{width:'5%'}}/><col style={{width:'7%'}}/><col style={{width:'6.5%'}}/></colgroup><thead><tr><th>Key</th><th title="SitePulse Priority">P</th><th>Created</th><th>Summary</th><th>Status</th><th>IESM_Location</th><th>Contact</th><th>Request Type</th><th>Sub-Request</th><th>Design</th><th>Assignee</th><th>Reporter</th></tr></thead>

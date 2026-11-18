@@ -34,6 +34,7 @@ export function SiteProvider({children}:{children:React.ReactNode}){
   });
   const polling=useRef(false),mounted=useRef(true),toastNum=useRef(0);
   const notify=useCallback((message:string,type:ToastType='info')=>{
+    if(/(?:SyntaxError|ReferenceError|TypeError|unexpected token|\bJSON\b|\{[\s\S]*\}|<html|stack trace)/i.test(message))message='This action could not be completed. Please retry or contact your administrator.';
     const id=++toastNum.current;
     setToasts(s=>[...s.slice(-3),{id,message,type,created:Date.now()}]);
   },[]);

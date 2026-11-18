@@ -1,3 +1,11 @@
+# CSP SitePulse V8 — Workflow and Workbook Update
+
+Changes from V7: Jira Desk is embedded under Tickets and uses parent/sub-queue dropdowns; Overview is removed for all roles; the Lead's Materials page can filter Materials, Labours, Machines and Others; responsive overflow rules are tightened. The approved-report export now fills the **Form Responses 1** sheet and maintains a readable **Approved Reports** archive. The archive stores dates and times separately, uses short report references, and displays plain-language quantities instead of serialized data. A one-time conversion of old archive rows keeps a hidden original-sheet backup. Older approvals without a verified approval timestamp leave the new approval date/time blank rather than inventing a date.
+
+After backend replacement run `setupProject()` once to add the `approved_at` reporting column to the existing Operations spreadsheet, then deploy **a new version** of the existing Apps Script Web app. Preserve `SPREADSHEET_ID`, `REPORTING_WORKBOOK_ID`, and the existing frontend `src/app/environment.ts`. All SitePulse approved reports can be reconciled using Admin → Workbook → Sync approved reports. V8 does not modify Jira assignments or replace the original Google spreadsheets.
+
+---
+
 # CSP SitePulse V7 - React frontend
 
 This is a React/Vite/TypeScript replacement for the earlier Angular user interface. It retains the Isha-inspired visual language and the existing Google Apps Script + Google Sheets + Cloudflare Worker backend. It includes React Router (hash routing for GitHub Pages), React Hook Form, fixed pop-up alerts, responsive navigation and a compact CIVIL ticket table.
